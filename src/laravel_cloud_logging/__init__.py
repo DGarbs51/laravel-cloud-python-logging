@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import io
 import json
 import logging
@@ -72,6 +73,8 @@ _ACCESS = ('uvicorn.access', 'gunicorn.access', 'hypercorn.access', 'granian.acc
 # Same limits as Monolog's normalizer, plus a size cap well under the platform's
 # 1 MB truncation, which would turn the record into plain text at info level.
 _DEPTH, _ITEMS, _STRING, _TRACE, _LINE = 9, 1000, 16384, 100, 256 * 1024
+_RETRY = 5  # seconds on stdout before trying the socket again
+_dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(',', ':'))
 
 __all__ = [
     'ALERT',
@@ -118,7 +121,7 @@ def _clean(value: object, depth: int = 1) -> _Json:
         items = list(cast('Iterable[object]', value))
         out: list[_Json] = [_clean(v, depth + 1) for v in items[:_ITEMS]]
         if len(items) > _ITEMS:
-            out.append(f'Over {_ITEMS} items ({len(items)} total), aborting normalization')
+            out.append(_over_items(len(items)))
         return out
     if isinstance(value, BaseException):
         return _exception(value, depth)
@@ -131,10 +134,14 @@ def _clean_dict(value: dict[object, object], depth: int) -> dict[str, _Json]:
     out: dict[str, _Json] = {}
     for i, (k, v) in enumerate(value.items()):
         if i == _ITEMS:
-            out['...'] = f'Over {_ITEMS} items ({len(value)} total), aborting normalization'
+            out['...'] = _over_items(len(value))
             break
         out[str(k)] = _clean(v, depth + 1)
     return out
+
+
+def _over_items(total: int) -> str:
+    return f'Over {_ITEMS} items ({total} total), aborting normalization'
 
 
 def _str(value: object) -> str:
@@ -153,15 +160,18 @@ def _cut(value: str) -> str: ...
 def _cut(value: _T) -> _T: ...
 def _cut(value: object) -> object:
     """Cut a string to _STRING UTF-8 bytes (never mid-character), marking it when cut."""
-    if not isinstance(value, str) or len(value) <= _STRING // 4 or len(value.encode()) <= _STRING:
+    if not isinstance(value, str) or len(value) <= _STRING // 4:
         return value
-    return value.encode()[:_STRING].decode(errors='ignore') + ' [truncated]'
+    raw = value.encode()
+    if len(raw) <= _STRING:
+        return value
+    return raw[:_STRING].decode(errors='ignore') + ' [truncated]'
 
 
 def _exception(exc: BaseException, depth: int = 1, seen: set[int] | None = None) -> dict[str, _Json]:
     seen = seen or set()
     seen.add(id(exc))
-    frames = traceback.extract_tb(exc.__traceback__)
+    frames = traceback.extract_tb(exc.__traceback__, limit=-_TRACE)  # innermost _TRACE frames
     last = frames[-1] if frames else None
     data: dict[str, _Json] = {
         'class': f'{type(exc).__module__}.{type(exc).__qualname__}'.removeprefix('builtins.'),
@@ -169,7 +179,7 @@ def _exception(exc: BaseException, depth: int = 1, seen: set[int] | None = None)
         'code': exc.args[0] if exc.args and isinstance(exc.args[0], int) and not isinstance(exc.args[0], bool) else 0,
         'file': f'{last.filename}:{last.lineno}' if last else '',
         # Innermost frame first, like PHP; 'trace' must exist for the trace view.
-        'trace': [f'{f.filename}:{f.lineno} in {f.name}' for f in list(reversed(frames))[:_TRACE]],
+        'trace': [f'{f.filename}:{f.lineno} in {f.name}' for f in reversed(frames)],
     }
     cause = exc.__cause__ if exc.__cause__ is not None else (None if exc.__suppress_context__ else exc.__context__)
     if cause is not None and id(cause) not in seen and depth < _DEPTH:
@@ -189,7 +199,7 @@ class MonologFormatter(logging.Formatter):
             return self._encode(self._base(record, 'log record formatting failed', {}))
 
     def _base(self, record: logging.LogRecord, message: str, context: dict[str, _Json]) -> _Record:
-        number, name = next(((n, s) for py, n, s in _LEVELS if record.levelno >= py), (100, 'DEBUG'))
+        number, name = next(((n, s) for py, n, s in _LEVELS if record.levelno >= py), _LEVELS[-1][1:])
         return {
             'message': message,
             'context': context,
@@ -214,7 +224,7 @@ class MonologFormatter(logging.Formatter):
         return self._base(record, record.getMessage(), _clean_dict(context, 1))
 
     def _encode(self, data: _Record) -> str:
-        line = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        line = _dumps(data)
         if _fits(line):
             return line
         data['message'] = _cut(data['message'])
@@ -224,22 +234,22 @@ class MonologFormatter(logging.Formatter):
             exc['message'] = _cut(exc.get('message'))
             exc['trace'] = trace[:20]
             exc.pop('previous', None)
-        line = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        line = _dumps(data)
         if _fits(line):
             return line
-        note = 'context dropped: record exceeded 256 KiB'
+        note = f'context dropped: record exceeded {_LINE // 1024} KiB'
         keep: dict[str, _Json] = {
             k: data['context'][k] for k in ('exception', 'cloud_request_id') if k in data['context']
         }
         data['context'] = {**keep, 'truncated': note}
-        line = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        line = _dumps(data)
         if _fits(line):
             return line
         # Last resort: cut every remaining free-form field, so the seven keys and the level survive.
         data['context'] = {'truncated': note}
         data['channel'] = _cut(data['channel'])
         data['extra'] = {'logger': _cut(data['extra']['logger'])}
-        return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        return _dumps(data)
 
 
 def _fits(line: str) -> bool:
@@ -274,10 +284,10 @@ class CloudHandler(logging.Handler):
                     sock, target = socket.socket(socket.AF_INET, socket.SOCK_STREAM), (host, int(port))
                 sock.settimeout(2.0)
                 sock.connect(target)
-            except Exception:  # bad address, no AF_UNIX, refused: fall back to stdout for 5 s
+            except Exception:  # bad address, no AF_UNIX, refused: fall back to stdout for _RETRY seconds
                 if sock is not None:
                     sock.close()
-                self.retry_at = time.monotonic() + 5
+                self.retry_at = time.monotonic() + _RETRY
                 return None
             self.sock = sock
         return self.sock
@@ -295,7 +305,7 @@ class CloudHandler(logging.Handler):
                 sock.sendall(data)
                 return
             except OSError:
-                self.sock, self.retry_at = None, time.monotonic() + 5
+                self.sock, self.retry_at = None, time.monotonic() + _RETRY
                 with contextlib.suppress(OSError):
                     sock.close()
         with contextlib.suppress(Exception):
@@ -330,7 +340,7 @@ def configure(
     work too. Uncaught main/thread exceptions are logged unless exceptions=False;
     interrupts and exits are left alone.
     """
-    for number, name in ((NOTICE, 'NOTICE'), (ALERT, 'ALERT'), (EMERGENCY, 'EMERGENCY')):
+    for number, _, name in _LEVELS:  # only NOTICE, ALERT and EMERGENCY are unnamed by default
         if logging.getLevelName(number) == f'Level {number}':
             logging.addLevelName(number, name)
     level = os.environ.get('LOG_LEVEL', 'INFO') if level is None else level
@@ -342,14 +352,11 @@ def configure(
     if not isinstance(level, int):
         level = logging.INFO
     loggers: dict[str, dict[str, object]] = {
-        name: {'handlers': [], 'level': level, 'propagate': True} for name in _LOGGERS
+        name: {'handlers': [], 'level': level, 'propagate': True} for name in _LOGGERS + _ACCESS
     }
-    for name in _ACCESS:
-        loggers[name] = (
-            {'handlers': [], 'level': level, 'propagate': True}
-            if access_logs
-            else {'handlers': [], 'level': logging.CRITICAL + 100, 'propagate': False}
-        )
+    if not access_logs:
+        for name in _ACCESS:
+            loggers[name] = {'handlers': [], 'level': logging.CRITICAL + 100, 'propagate': False}
     config: dict[str, object] = {
         'version': 1,
         'disable_existing_loggers': False,

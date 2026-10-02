@@ -6,14 +6,21 @@ import socket
 import sys
 import threading
 import warnings
+from contextlib import closing
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
-from helpers import KEYS, Collector, captured_stdout, fmt
+from helpers import KEYS, Broken, Collector, captured_stdout, fmt
 
 import laravel_cloud_logging as lcl
 from laravel_cloud_logging import CloudHandler, MonologFormatter, configure
+
+
+@pytest.fixture
+def collector():
+    with closing(Collector()) as collector:
+        yield collector
 
 
 def test_key_order_and_reserved_keys_stay_in_context():
@@ -204,18 +211,13 @@ def test_size_cap():
 
 
 def test_formatter_failure_still_emits_json():
-    class Broken(logging.LogRecord):
-        def getMessage(self):
-            raise RuntimeError
-
     record = Broken('x', logging.WARNING, __file__, 1, 'm', (), None)
     entry = json.loads(MonologFormatter().format(record))
     assert entry['message'] == 'log record formatting failed'
     assert entry['level_name'] == 'WARNING'
 
 
-def test_socket_transport_concurrency_and_repeat_configure():
-    collector = Collector()
+def test_socket_transport_concurrency_and_repeat_configure(collector):
     env = {'LARAVEL_CLOUD': '1', 'LARAVEL_CLOUD_LOG_SOCKET': collector.address, 'LOG_LEVEL': 'debug'}
     with patch.dict(os.environ, env), captured_stdout() as stdout:
         configure()
@@ -244,12 +246,10 @@ def test_socket_transport_concurrency_and_repeat_configure():
         assert len(concurrent) == 40
         assert all(len(line['message']) == 20003 for line in concurrent)
         assert stdout() == []
-    collector.close()
 
 
 @pytest.mark.skipif(not hasattr(os, 'fork'), reason='needs fork')
-def test_fork_reconnects():
-    collector = Collector()
+def test_fork_reconnects(collector):
     with patch.dict(os.environ, {'LARAVEL_CLOUD': '1', 'LARAVEL_CLOUD_LOG_SOCKET': collector.address}):
         configure(exceptions=False)
         logging.info('from parent')
@@ -266,11 +266,9 @@ def test_fork_reconnects():
         assert os.waitstatus_to_exitcode(status) == 0
         collector.find('from child')
         assert len(collector.conns) == 2
-    collector.close()
 
 
-def test_request_id_in_context():
-    collector = Collector()
+def test_request_id_in_context(collector):
     with patch.dict(os.environ, {'LARAVEL_CLOUD': '1', 'LARAVEL_CLOUD_LOG_SOCKET': collector.address}):
         configure(exceptions=False)
         token = lcl.cloud_request_id.set('req-1')
@@ -281,11 +279,9 @@ def test_request_id_in_context():
         assert collector.find('in request')['context'] == {'cloud_request_id': 'req-1'}  # platform ID wins
         assert collector.find('in request 2')['context'] == {'cloud_request_id': 'req-1'}
         assert collector.find('after request')['context'] == {}
-    collector.close()
 
 
-def test_fallback_to_stdout_after_socket_loss_and_retry_delay():
-    collector = Collector()
+def test_fallback_to_stdout_after_socket_loss_and_retry_delay(collector):
     with (
         patch.dict(os.environ, {'LARAVEL_CLOUD': '1', 'LARAVEL_CLOUD_LOG_SOCKET': collector.address}),
         captured_stdout() as stdout,
@@ -501,10 +497,6 @@ def test_handler_lines_never_exceed_256_kib():
 
 
 def test_handler_failures_never_raise():
-    class Broken(logging.LogRecord):
-        def getMessage(self):
-            raise RuntimeError
-
     handler = CloudHandler(None)
     handler.setFormatter(logging.Formatter('%(message)s'))  # a formatter that raises
     with patch.object(sys, 'stderr', open(os.devnull, 'w')) as closed:
@@ -528,8 +520,7 @@ def test_handler_failures_never_raise():
     assert handler.sock is None
 
 
-def test_reconnects_after_retry_delay():
-    collector = Collector()
+def test_reconnects_after_retry_delay(collector):
     handler = CloudHandler(collector.address)
     handler.setFormatter(MonologFormatter())
 
@@ -548,4 +539,3 @@ def test_reconnects_after_retry_delay():
     assert collector.find('reconnected')
     assert handler.sock.gettimeout() == 2.0
     handler.close()
-    collector.close()

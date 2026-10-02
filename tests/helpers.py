@@ -76,6 +76,11 @@ def captured_stdout():
         yield lambda: [json.loads(line) for line in raw.getvalue().splitlines()]
 
 
+class Broken(logging.LogRecord):
+    def getMessage(self):
+        raise RuntimeError
+
+
 def fmt(**kwargs):
     record = logging.LogRecord(
         'app.billing',
