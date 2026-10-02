@@ -49,7 +49,6 @@ pip install laravel-cloud-logging
 | uWSGI / pyuwsgi | Call `configure()` in the app module, and add `--disable-logging` so uWSGI does not write a plain-text line for every request. Also add `--die-on-term`: in uWSGI 2.0, `SIGTERM` reloads the server instead of stopping it. Workers forked after the app loads reconnect to the socket on their own. |
 | Celery | Call `from laravel_cloud_logging.celery import setup; setup(app)`. This sets `worker_hijack_root_logger=False` and connects `configure()` to the `setup_logging` signal with `weak=False`. Keyword arguments are passed to `configure()`. |
 | RQ | Call `configure()` before or after the worker sets up its logging. Both orders work, because `configure()` also clears the handlers on `rq.worker`. |
-| `laravel-cloud-queues` | Call `configure()` before you start the worker. The worker calls `basicConfig` only when root has no handlers, so it keeps yours. Note: the worker's JSON job-event lines have no `level` or `message` today, so the dashboard shows them as plain entries. |
 
 ## Request IDs
 
