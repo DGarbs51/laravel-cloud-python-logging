@@ -59,7 +59,7 @@ def test_starlette_and_uvicorn_config():
             return PlainTextResponse('ok')
 
         app = Starlette(routes=[Route('/', index)])
-        app.add_middleware(lambda inner: lcl.asgi_middleware(inner))
+        app.add_middleware(lcl.asgi_middleware)
         with TestClient(app) as client:
             assert client.get('/', headers={'Cloud-Request-ID': 's-1'}).text == 'ok'
         uvicorn.Config(app, log_config=None)  # what uvicorn.run(..., log_config=None) builds

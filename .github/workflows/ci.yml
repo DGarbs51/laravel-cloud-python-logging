@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --python ${{ matrix.python }} --group test pytest -q
+      - name: Package has no runtime dependencies
+        run: uv build && unzip -p dist/*.whl '*/METADATA' | (! grep -q '^Requires-Dist')
