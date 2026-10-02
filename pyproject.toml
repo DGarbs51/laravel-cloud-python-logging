@@ -9,11 +9,17 @@ description = "Laravel-style (Monolog JSON) logging for Python apps on Laravel C
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "Devon Garbalosa" }]
 requires-python = ">=3.10"
 dependencies = []
 keywords = ["laravel", "laravel-cloud", "logging", "monolog", "json", "django", "flask", "fastapi"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Celery",
+    "Framework :: Django",
+    "Framework :: FastAPI",
+    "Framework :: Flask",
     "Intended Audience :: Developers",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
@@ -26,10 +32,14 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3.15",
     "Topic :: System :: Logging",
+    "Typing :: Typed",
 ]
 
 [project.urls]
 Homepage = "https://github.com/DGarbs51/laravel-cloud-python-logging"
+Source = "https://github.com/DGarbs51/laravel-cloud-python-logging"
+Issues = "https://github.com/DGarbs51/laravel-cloud-python-logging/issues"
+Releases = "https://github.com/DGarbs51/laravel-cloud-python-logging/releases"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "README.md", "LICENSE"]
