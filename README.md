@@ -46,12 +46,12 @@ configure(level=None, *, exceptions=True, access_logs=False)
 
 ## Request IDs
 
-The middleware reads the `Cloud-Request-ID` header into a `contextvars.ContextVar` (`laravel_cloud_logging.cloud_request_id`). Every record logged during the request then has `context.cloud_request_id`. The platform sets this header and replaces any value a client sends.
+The middleware reads the `Cloud-Request-ID` header into a `contextvars.ContextVar` (`laravel_cloud_logging.cloud_request_id`). Every record logged during the request then has `context.cloud_request_id`, which replaces any `cloud_request_id` you pass in `extra=`. The platform sets this header and replaces any value a client sends.
 
 The package does not use `X-Request-ID`, because clients can set it and the platform passes it through. IDs longer than 128 characters are ignored.
 
 - WSGI and Django set the variable on every request, to `None` when the header is missing. That way a reused worker thread never keeps an old ID.
-- ASGI handles only `http` and `websocket` scopes, and resets the variable when the request finishes.
+- ASGI matches the header name in any case, handles only `http` and `websocket` scopes, and resets the variable when the request finishes.
 
 ## Wire format
 
@@ -102,6 +102,9 @@ The dashboard shows the whole chain.
 
 1. First, the message and long top-level context strings are cut to 16 KiB each, with ` [truncated]` added. The exception trace is cut to 20 frames, and `previous` is dropped.
 2. If the line is still too long, only `exception`, `cloud_request_id` and a `truncated` note are kept.
+3. If it is still too long, `context` keeps only the note, and `channel` and the logger name are cut to 16 KiB.
+
+The 256 KiB budget includes the trailing newline. Cuts count UTF-8 bytes and never split a character.
 
 The result is always valid JSON at the right level.
 

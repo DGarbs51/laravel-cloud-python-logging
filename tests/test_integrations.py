@@ -87,8 +87,11 @@ def test_django_middleware():
     handler(factory.get('/'))
     assert seen == ['d-1', None]
 
+    # Django's setup() runs configure_logging(LOGGING_CONFIG, LOGGING); with None it must leave ours alone.
+    from django.utils.log import configure_logging
     configure(exceptions=False)
-    assert only_cloud_handler()  # LOGGING_CONFIG = None: django.setup() left logging alone
+    configure_logging(settings.LOGGING_CONFIG, settings.LOGGING)
+    assert only_cloud_handler() and logging.getLogger('django').handlers == []
 
 
 def test_gunicorn_logconfig_dict():

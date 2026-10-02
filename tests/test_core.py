@@ -30,6 +30,7 @@ def test_key_order_and_reserved_keys_stay_in_context():
 @pytest.mark.parametrize('py, number, name', [
     (5, 100, 'DEBUG'), (10, 100, 'DEBUG'), (20, 200, 'INFO'), (25, 250, 'NOTICE'), (30, 300, 'WARNING'),
     (40, 400, 'ERROR'), (50, 500, 'CRITICAL'), (55, 550, 'ALERT'), (60, 600, 'EMERGENCY'), (70, 600, 'EMERGENCY'),
+    (-1, 100, 'DEBUG'), (0, 100, 'DEBUG'), (35, 300, 'WARNING'), (59, 550, 'ALERT'),
 ])
 def test_level_mapping(py, number, name):
     entry = fmt(level=py)
@@ -223,7 +224,7 @@ def test_request_id_in_context():
         logging.info('in request 2')
         lcl.cloud_request_id.reset(token)
         logging.info('after request')
-        assert collector.find('in request')['context'] == {'cloud_request_id': 'user-set'}
+        assert collector.find('in request')['context'] == {'cloud_request_id': 'req-1'}  # platform ID wins
         assert collector.find('in request 2')['context'] == {'cloud_request_id': 'req-1'}
         assert collector.find('after request')['context'] == {}
     collector.close()
@@ -371,7 +372,7 @@ def test_asgi_middleware():
     wrapped = lcl.asgi_middleware(app)
 
     async def run():
-        await wrapped({'type': 'http', 'headers': [(b'cloud-request-id', b'def')]}, None, None)
+        await wrapped({'type': 'http', 'headers': [(b'Cloud-Request-ID', b'def')]}, None, None)
         seen.append(lcl.cloud_request_id.get())  # reset after the request
         await wrapped({'type': 'websocket', 'headers': [(b'cloud-request-id', b'ws')]}, None, None)
         await wrapped({'type': 'http', 'headers': [(b'x-request-id', b'client-set')]}, None, None)
@@ -381,3 +382,95 @@ def test_asgi_middleware():
 
     asyncio.run(run())
     assert seen == ['def', None, 'ws', None, 'outer']
+
+
+def test_review_regressions_in_formatter():
+    class BrokenStr(Exception):
+        def __str__(self):
+            raise ValueError
+
+    exc = fmt(exc_info=(BrokenStr, BrokenStr(), None), order=1)['context']
+    assert exc['order'] == 1 and exc['exception']['message'] == '[unprintable BrokenStr]'
+
+    class Falsey(Exception):
+        def __bool__(self):
+            return False
+
+    outer = RuntimeError('outer')
+    outer.__cause__ = Falsey('cause')
+    assert fmt(exc_info=(RuntimeError, outer, None))['context']['exception']['previous']['class'].endswith('Falsey')
+
+    user_exception = fmt(level=logging.ERROR, blob='b' * 300_000, exception={'domain': 'user'})
+    assert user_exception['message'] == 'hello world' and user_exception['context']['exception'] == {'domain': 'user'}
+
+
+def test_size_cap_counts_bytes_and_marks_cuts():
+    emoji = fmt(msg='😀' * 100_000, args=())['message']
+    assert emoji.endswith(' [truncated]') and len(emoji.encode()) <= 16384 + 12
+
+    try:
+        raise ValueError('z' * 300_000)
+    except ValueError:
+        exc = fmt(exc_info=sys.exc_info())['context']['exception']
+    assert exc['message'].endswith(' [truncated]') and len(exc['message']) == 16384 + 12
+
+
+def test_handler_lines_never_exceed_256_kib():
+    with captured_stdout() as stdout:
+        handler = CloudHandler(None)
+        handler.address = None  # stdout, even if the tests run on Cloud
+        handler.setFormatter(MonologFormatter(channel='c' * 300_000))
+        for name, msg in (('n' * 300_000, 'm'), ('app', 'x' * 262_100), ('app', 'y' * 262_200)):
+            handler.handle(logging.LogRecord(name, logging.ERROR, __file__, 1, msg, (), None))
+        sys.__stdout__.flush()
+        raw = sys.__stdout__.buffer.getvalue()
+        entries = stdout()
+    assert len(entries) == 3 and all(list(e) == KEYS and e['level_name'] == 'ERROR' for e in entries)
+    assert all(len(line) + 1 <= 256 * 1024 for line in raw.split(b'\n') if line)
+
+
+def test_handler_failures_never_raise():
+    class Broken(logging.LogRecord):
+        def getMessage(self):
+            raise RuntimeError
+
+    handler = CloudHandler(None)
+    handler.setFormatter(logging.Formatter('%(message)s'))  # a formatter that raises
+    with patch.object(sys, 'stderr', open(os.devnull, 'w')) as closed:
+        closed.close()
+        handler.handle(Broken('x', logging.ERROR, __file__, 1, 'm', (), None))
+
+    class FailingSocket:
+        def sendall(self, data):
+            raise OSError('send failed')
+
+        def close(self):
+            raise OSError('close failed')
+
+    handler = CloudHandler('unix:///unused')
+    handler.setFormatter(MonologFormatter())
+    handler.sock, handler.pid = FailingSocket(), os.getpid()
+    with captured_stdout() as stdout:
+        handler.handle(logging.LogRecord('x', logging.ERROR, __file__, 1, 'still here', (), None))
+        sys.__stdout__.flush()
+        assert stdout()[0]['message'] == 'still here'
+    assert handler.sock is None
+
+
+def test_reconnects_after_retry_delay():
+    collector = Collector()
+    handler = CloudHandler(collector.address)
+    handler.setFormatter(MonologFormatter())
+    record = lambda msg: logging.LogRecord('x', logging.INFO, __file__, 1, msg, (), None)
+    clock = [1000.0]
+    with patch('laravel_cloud_logging.time.monotonic', lambda: clock[0]), captured_stdout() as stdout:
+        handler.retry_at = 1004.0  # as if a failure happened 1 s ago
+        handler.handle(record('waiting'))
+        assert handler.sock is None
+        clock[0] = 1005.0
+        handler.handle(record('reconnected'))
+        sys.__stdout__.flush()
+        assert [e['message'] for e in stdout()] == ['waiting']
+    assert collector.find('reconnected') and handler.sock.gettimeout() == 2.0
+    handler.close()
+    collector.close()

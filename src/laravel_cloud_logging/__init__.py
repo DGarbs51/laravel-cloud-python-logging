@@ -72,10 +72,21 @@ def _clean(value, depth=1):
         return _exception(value, depth)
     if isinstance(value, datetime):
         return value.isoformat()
+    return _str(value)
+
+
+def _str(value):
     try:
         return str(value)
     except Exception:
         return f'[unprintable {type(value).__name__}]'
+
+
+def _cut(value):
+    """Cut a string to _STRING UTF-8 bytes (never mid-character), marking it when cut."""
+    if not isinstance(value, str) or len(value) <= _STRING // 4 or len(value.encode()) <= _STRING:
+        return value
+    return value.encode()[:_STRING].decode(errors='ignore') + ' [truncated]'
 
 
 def _exception(exc, depth=1, seen=None):
@@ -85,13 +96,13 @@ def _exception(exc, depth=1, seen=None):
     last = frames[-1] if frames else None
     data = {
         'class': f'{type(exc).__module__}.{type(exc).__qualname__}'.removeprefix('builtins.'),
-        'message': str(exc),
+        'message': _str(exc),
         'code': exc.args[0] if exc.args and isinstance(exc.args[0], int) and not isinstance(exc.args[0], bool) else 0,
         'file': f'{last.filename}:{last.lineno}' if last else '',
         # Innermost frame first, like PHP; 'trace' must exist for the trace view.
         'trace': [f'{f.filename}:{f.lineno} in {f.name}' for f in reversed(frames)][:_TRACE],
     }
-    cause = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    cause = exc.__cause__ if exc.__cause__ is not None else (None if exc.__suppress_context__ else exc.__context__)
     if cause is not None and id(cause) not in seen and depth < _DEPTH:
         data['previous'] = _exception(cause, depth + 1, seen)
     return data
@@ -109,7 +120,7 @@ class MonologFormatter(logging.Formatter):
             return self._encode(self._base(record, 'log record formatting failed', {}))
 
     def _base(self, record, message, context):
-        number, name = next((n, s) for py, n, s in _LEVELS if record.levelno >= py)
+        number, name = next(((n, s) for py, n, s in _LEVELS if record.levelno >= py), (100, 'DEBUG'))
         return {'message': message, 'context': context, 'level': number, 'level_name': name,
                 'channel': self.channel,
                 'datetime': datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec='microseconds'),
@@ -121,7 +132,7 @@ class MonologFormatter(logging.Formatter):
         context = {k: v for k, v in record.__dict__.items() if k not in _STANDARD}
         request_id = cloud_request_id.get()
         if request_id:
-            context.setdefault('cloud_request_id', request_id)
+            context['cloud_request_id'] = request_id  # the platform's ID wins over a user extra
         if record.exc_info and record.exc_info[1] is not None:
             context['exception'] = record.exc_info[1]
         if record.stack_info:
@@ -129,26 +140,31 @@ class MonologFormatter(logging.Formatter):
         return self._base(record, record.getMessage(), _clean(context))
 
     def _encode(self, data):
+        # The budget includes the newline the handler adds.
+        fits = lambda line: len(line.encode()) < _LINE
         line = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-        if len(line.encode()) <= _LINE:
+        if fits(line):
             return line
-        cut = lambda v: v[:_STRING] + ' [truncated]' if isinstance(v, str) and len(v) > _STRING else v
-        data['message'] = cut(data['message'])
-        data['context'] = {k: cut(v) for k, v in data['context'].items()}
+        data['message'] = _cut(data['message'])
+        data['context'] = {k: _cut(v) for k, v in data['context'].items()}
         exc = data['context'].get('exception')
-        if isinstance(exc, dict):
-            exc['message'] = exc['message'][:_STRING]
+        if isinstance(exc, dict) and isinstance(exc.get('trace'), list):  # ours, not a user dict
+            exc['message'] = _cut(exc.get('message'))
             exc['trace'] = exc['trace'][:20]
             exc.pop('previous', None)
         line = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-        if len(line.encode()) <= _LINE:
+        if fits(line):
             return line
+        note = 'context dropped: record exceeded 256 KiB'
         keep = {k: data['context'][k] for k in ('exception', 'cloud_request_id') if k in data['context']}
-        data['context'] = {**keep, 'truncated': 'context dropped: record exceeded 256 KiB'}
+        data['context'] = {**keep, 'truncated': note}
         line = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-        if len(line.encode()) <= _LINE:
+        if fits(line):
             return line
-        data['context'] = {'truncated': 'context dropped: record exceeded 256 KiB'}
+        # Last resort: cut every remaining free-form field, so the seven keys and the level survive.
+        data['context'] = {'truncated': note}
+        data['channel'] = _cut(data['channel'])
+        data['extra'] = {'logger': _cut(data['extra']['logger'])}
         return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
 
 
@@ -187,7 +203,10 @@ class CloudHandler(logging.Handler):
         try:
             data = (self.format(record) + '\n').encode()
         except Exception:
-            self.handleError(record)
+            try:
+                self.handleError(record)
+            except Exception:  # e.g. sys.stderr closed
+                pass
             return
         sock = self._connect()
         if sock is not None:
@@ -195,8 +214,11 @@ class CloudHandler(logging.Handler):
                 sock.sendall(data)
                 return
             except OSError:
-                sock.close()
                 self.sock, self.retry_at = None, time.monotonic() + 5
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         try:
             out = sys.__stdout__.buffer
             out.write(data)  # one write per line; stdout lines over 4 KiB can interleave between processes
@@ -271,7 +293,7 @@ def asgi_middleware(app):
     async def wrapped(scope, receive, send):
         if scope.get('type') not in ('http', 'websocket'):
             return await app(scope, receive, send)
-        raw = dict(scope.get('headers') or []).get(b'cloud-request-id', b'')
+        raw = next((v for k, v in scope.get('headers') or [] if k.lower() == b'cloud-request-id'), b'')
         token = cloud_request_id.set(_header_id(raw.decode('latin-1')))
         try:
             return await app(scope, receive, send)
