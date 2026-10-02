@@ -141,3 +141,41 @@ def test_rq_either_order():
     setup_loghandlers('INFO')  # rq first: configure() removes rq's stdout handlers
     configure(exceptions=False)
     assert logging.getLogger('rq.worker').handlers == []
+
+
+def test_hypercorn_logconfig_dict():
+    pytest.importorskip('hypercorn')
+    from hypercorn.config import Config
+    from hypercorn.logging import Logger
+
+    cfg = Config()
+    cfg.accesslog = '-'  # even when enabled, the access logger stays silent
+    cfg.logconfig_dict = configure(exceptions=False)
+    Logger(cfg)  # installs its own stderr/stdout handlers, then applies logconfig_dict
+    assert only_cloud_handler()
+    assert logging.getLogger('hypercorn.error').handlers == [] and logging.getLogger('hypercorn.error').propagate
+    access = logging.getLogger('hypercorn.access')
+    assert access.handlers == [] and access.propagate is False
+
+
+def test_granian_worker_then_configure():
+    pytest.importorskip('granian')
+    from granian.log import LogLevels, configure_logging
+
+    def run():
+        configure_logging(LogLevels.info)  # what each worker runs before it imports the app
+        configure(exceptions=False)  # the app module's import
+        logging.getLogger('_granian').info('Started worker-1')
+
+    entries = lines_after(run)
+    assert [e['message'] for e in entries] == ['Started worker-1'] and only_cloud_handler()
+    assert logging.getLogger('granian.access').propagate is False
+
+
+def test_waitress_serve_level():
+    pytest.importorskip('waitress')
+
+    logging.getLogger('waitress').setLevel(logging.INFO)  # waitress-serve, before it imports the app
+    configure(level='WARNING', exceptions=False)  # the app module's import
+    logging.basicConfig()  # waitress.serve(); a no-op once root has a handler
+    assert only_cloud_handler() and logging.getLogger('waitress').level == logging.WARNING

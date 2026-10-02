@@ -30,10 +30,10 @@ _LEVELS = ((EMERGENCY, 600, 'EMERGENCY'), (ALERT, 550, 'ALERT'), (logging.CRITIC
            (logging.ERROR, 400, 'ERROR'), (logging.WARNING, 300, 'WARNING'), (NOTICE, 250, 'NOTICE'),
            (logging.INFO, 200, 'INFO'), (0, 100, 'DEBUG'))
 _STANDARD = set(logging.LogRecord('', 0, '', 0, '', (), None).__dict__) | {'message', 'asctime'}
-_LOGGERS = ('uvicorn', 'uvicorn.error', 'gunicorn', 'gunicorn.error', 'celery', 'django',
-            'django.server', 'werkzeug', 'asyncio', 'py.warnings', 'rq.worker')
+_LOGGERS = ('uvicorn', 'uvicorn.error', 'gunicorn', 'gunicorn.error', 'hypercorn.error', '_granian',
+            'waitress', 'celery', 'django', 'django.server', 'werkzeug', 'asyncio', 'py.warnings', 'rq.worker')
 # nginx on Cloud already logs every request; app-server access lines would duplicate it.
-_ACCESS = ('uvicorn.access', 'gunicorn.access')
+_ACCESS = ('uvicorn.access', 'gunicorn.access', 'hypercorn.access', 'granian.access')
 # Same limits as Monolog's normalizer, plus a size cap well under the platform's
 # 1 MB truncation, which would turn the record into plain text at info level.
 _DEPTH, _ITEMS, _STRING, _TRACE, _LINE = 9, 1000, 16384, 100, 256 * 1024
