@@ -1,186 +1,141 @@
 # laravel-cloud-logging
 
-Python logging for Laravel Cloud that matches a Laravel app's logs. Levels, context and exception chains show up in the Cloud dashboard the same way they do for Laravel. The package has no runtime dependencies. It supports Python 3.10 to 3.15.
+Make your Python app's logs look like a Laravel app's logs in the Laravel Cloud dashboard. You get real levels, structured context, request IDs and full exception chains, without plain-text noise.
 
-```python
-from laravel_cloud_logging import configure
+No runtime dependencies. Python 3.10 to 3.15.
 
-configure()
-```
-
-Call `configure()` once, as early as possible at startup. It:
-
-- replaces existing handlers on the root logger and on common framework loggers (`uvicorn`, `gunicorn`, `hypercorn`, `granian`, `waitress`, `celery`, `django`, `werkzeug`, `asyncio`, `rq.worker`, `py.warnings`), and makes those loggers propagate to root;
-- captures `warnings`;
-- logs uncaught exceptions (main thread and `threading`) at CRITICAL;
-- silences the `uvicorn`, `gunicorn`, `hypercorn` and `granian` access loggers;
-- returns a `logging.config.dictConfig` dict, which Gunicorn can use.
-
-You can call it more than once. Logging never raises into your app.
-
-```python
-configure(level=None, *, exceptions=True, access_logs=False)
-```
-
-- `level`: a name (`"debug"`, `"notice"`) or a number. Default: the `LOG_LEVEL` environment variable, then `INFO`. Unknown names fall back to `INFO`.
-- `exceptions=False`: do not install the uncaught-exception hooks.
-- `access_logs=True`: keep app-server access logs. They are off by default because Cloud's nginx already logs every request, with its status and timing.
+## Quick start
 
 ```sh
 pip install laravel-cloud-logging
 ```
 
+```python
+import logging
+from laravel_cloud_logging import configure
+
+configure()
+
+logging.getLogger(__name__).info('Order shipped', extra={'order_id': 42})
+```
+
+Call `configure()` once, as early as possible at startup. Then log with the standard `logging` module. Your app needs no other changes.
+
+Now add the setup for your framework or server below.
+
 ## Framework setup
 
-`wsgi_middleware` and `asgi_middleware` are imported from `laravel_cloud_logging`.
+`wsgi_middleware` and `asgi_middleware` come from `laravel_cloud_logging`. The middleware adds the Cloud request ID to every log line. See [Request IDs](#request-ids).
 
 | Framework | Setup |
 |---|---|
 | Plain script | Call `configure()` before the first log call. |
-| Flask | Call `configure()` before you create the app. Then set `app.wsgi_app = wsgi_middleware(app.wsgi_app)`. |
-| FastAPI / Starlette | Call `configure()` and `app.add_middleware(asgi_middleware)`. Then start the server with `uvicorn.run(app, log_config=None)`. If you run several uvicorn workers, also call `configure()` in the module that defines the app. |
-| Django | In `settings.py`, set `LOGGING_CONFIG = None` and call `configure()`. Add `"laravel_cloud_logging.django.middleware"` near the top of `MIDDLEWARE`. Under ASGI, you can wrap the app in `asgi.py` instead: `application = asgi_middleware(get_asgi_application())`. |
+| Flask | Call `configure()` before you create the app. Then add `app.wsgi_app = wsgi_middleware(app.wsgi_app)`. |
+| FastAPI / Starlette | Call `configure()` and `app.add_middleware(asgi_middleware)`. Start with `uvicorn.run(app, log_config=None)`. With several workers, also call `configure()` in the module that defines the app. |
+| Django | In `settings.py`, set `LOGGING_CONFIG = None` and call `configure()`. Add `"laravel_cloud_logging.django.middleware"` near the top of `MIDDLEWARE`. |
+| Celery | `from laravel_cloud_logging.celery import setup; setup(app)`. Keyword arguments go to `configure()`. |
+| RQ | Call `configure()`. Before or after the worker starts, both work. |
+
+Your server may need one more step:
+
+| Server | Setup |
+|---|---|
 | Gunicorn | In `gunicorn.conf.py`, set `logconfig_dict = configure()`. Do not set `accesslog`. |
-| Hypercorn | In `hypercorn.conf.py`, set `logconfig_dict = configure()`, and start with `hypercorn -c file:hypercorn.conf.py ...`. Without it, Hypercorn writes its own lines twice: as plain text and as JSON. |
-| Uvicorn | Covered by the FastAPI row. From the CLI, `configure()` in the app module replaces Uvicorn's handlers. |
-| Granian | Call `configure()` in the app module. Workers log as JSON. The main process (`Starting granian`, `Spawning worker-1`) still prints plain text. |
-| Waitress | Call `configure()` in the app module. Waitress adds no access log. |
-| Daphne | Call `configure()` in the app module (`asgi.py`), and start with `daphne -v 0 ...`. At the default `-v 1`, Daphne writes a plain-text access line to stdout for every request. |
-| uWSGI / pyuwsgi | Call `configure()` in the app module, and add `--disable-logging` so uWSGI does not write a plain-text line for every request. Also add `--die-on-term`: in uWSGI 2.0, `SIGTERM` reloads the server instead of stopping it. Workers forked after the app loads reconnect to the socket on their own. |
-| Celery | Call `from laravel_cloud_logging.celery import setup; setup(app)`. This sets `worker_hijack_root_logger=False` and connects `configure()` to the `setup_logging` signal with `weak=False`. Keyword arguments are passed to `configure()`. |
-| RQ | Call `configure()` before or after the worker sets up its logging. Both orders work, because `configure()` also clears the handlers on `rq.worker`. |
-| `laravel-cloud-queues` | Call `configure()` before you start the worker. The worker calls `basicConfig` only when root has no handlers, so it keeps yours. Note: the worker's JSON job-event lines have no `level` or `message` today, so the dashboard shows them as plain entries. |
+| Uvicorn | Call `configure()` in the app module. |
+| Hypercorn | In `hypercorn.conf.py`, set `logconfig_dict = configure()`. Start with `hypercorn -c file:hypercorn.conf.py ...`. |
+| Granian | Call `configure()` in the app module. The main process still prints its boot lines as plain text. |
+| Waitress | Call `configure()` in the app module. |
+| Daphne | Call `configure()` in `asgi.py`. Start with `daphne -v 0 ...` to turn off its plain-text access log. |
+| uWSGI / pyuwsgi | Call `configure()` in the app module. Add `--disable-logging` to turn off its plain-text access log. Add `--die-on-term`, because uWSGI 2.0 reloads on `SIGTERM` instead of stopping. |
+
+## Options
+
+```python
+configure(level=None, *, exceptions=True, access_logs=False)
+```
+
+- `level`: a name (`"debug"`, `"notice"`) or a number. Default: the `LOG_LEVEL` environment variable, then `INFO`.
+- `exceptions=False`: do not log uncaught exceptions.
+- `access_logs=True`: keep your server's access logs. They are off by default, because Cloud already logs every request.
+
+## What `configure()` does
+
+- Sends every log record to Cloud as one JSON line, in the Monolog format that Laravel uses.
+- Takes over the root logger and common framework loggers (`uvicorn`, `gunicorn`, `django`, `celery` and others).
+- Captures `warnings` and uncaught exceptions, including exceptions in threads.
+- Turns off server access logs. Cloud's nginx already logs each request.
+- Returns a `logging.config.dictConfig` dict for servers that accept one.
+
+It is safe to call more than once. Logging never raises an error into your app.
 
 ## Request IDs
 
-The middleware reads the `Cloud-Request-ID` header into a `contextvars.ContextVar` (`laravel_cloud_logging.cloud_request_id`). Every record logged during the request then has `context.cloud_request_id`, which replaces any `cloud_request_id` you pass in `extra=`. The platform sets this header and replaces any value a client sends.
+The middleware reads the `Cloud-Request-ID` header. Every record logged during that request gets `context.cloud_request_id`, so you can find all the logs for one request. The ID is also available as the `laravel_cloud_logging.cloud_request_id` context variable.
 
-The package does not use `X-Request-ID`, because clients can set it and the platform passes it through. IDs longer than 128 characters are ignored.
+Cloud sets this header and replaces any value a client sends. The package ignores `X-Request-ID`, because clients control it.
 
-- WSGI and Django set the variable on every request, to `None` when the header is missing. That way a reused worker thread never keeps an old ID.
-- ASGI matches the header name in any case, handles only `http` and `websocket` scopes, and resets the variable when the request finishes.
+## Log levels
 
-## Wire format
+Python levels map to Laravel levels by rounding down:
 
-Each record is one compact JSON object on one line, in the Monolog shape that Laravel uses. The keys are always in this order:
-
-| Key | Value |
+| Python | Laravel |
 |---|---|
-| `message` | `record.getMessage()` |
-| `context` | Always present (`{}` when empty). It holds every `extra=` field, plus `cloud_request_id`, `exception` and `stack` (`stack_info`). |
-| `level` | Monolog number (see below) |
-| `level_name` | Monolog name (see below) |
-| `channel` | `APP_ENV`, then `LARAVEL_CLOUD_ENV_NAME`, then `local` |
-| `datetime` | `record.created` as UTC ISO-8601 with microseconds, `+00:00`. For display only: the platform orders logs by the time it receives them. |
-| `extra` | `{"logger": record.name}` |
+| 60 and above | EMERGENCY |
+| 55 | ALERT |
+| 50 (CRITICAL) | CRITICAL |
+| 40 (ERROR) | ERROR |
+| 30 (WARNING) | WARNING |
+| 25 | NOTICE |
+| 20 (INFO) | INFO |
+| below 20 | DEBUG |
 
-Python levels map to Monolog levels by rounding down:
+The `NOTICE`, `ALERT` and `EMERGENCY` constants are exported: `logger.log(laravel_cloud_logging.ALERT, "...")`.
 
-| Python level | `level` | `level_name` |
-|---|---|---|
-| 60 and above | 600 | EMERGENCY |
-| 55 | 550 | ALERT |
-| 50 (CRITICAL) | 500 | CRITICAL |
-| 40 (ERROR) | 400 | ERROR |
-| 30 (WARNING) | 300 | WARNING |
-| 25 | 250 | NOTICE |
-| 20 (INFO) | 200 | INFO |
-| below 20 | 100 | DEBUG |
+## Exceptions
 
-`configure()` registers `NOTICE` (25), `ALERT` (55) and `EMERGENCY` (60) as Python level names, but only when those numbers have no name yet. The constants are exported too: `logger.log(laravel_cloud_logging.ALERT, "...")`. The dashboard styles all eight names. The public logs API collapses them to info, warning, error and debug.
-
-**Exceptions** go in `context.exception` as `{class, message, code, file, trace, previous}`:
-
-- `class` is module-qualified, without `builtins.`.
-- `code` is `args[0]` when it is an int (not a bool). Otherwise it is 0.
-- `file` is `path:line` of the innermost frame.
-- `trace` holds up to 100 `path:line in func` strings, innermost first.
-- `previous` follows `__cause__`, or `__context__` unless it is suppressed. It is recursive and safe against cycles.
-
-The dashboard shows the whole chain.
-
-**Normalization** follows Monolog's rules:
-
-- depth is limited to 9, and each container to 1000 items, using Monolog's marker strings;
-- non-finite floats become strings;
-- other objects become `str()`, and an object that cannot be printed becomes a marker.
-
-**Size cap: 256 KiB per line.**
-
-1. First, the message and long top-level context strings are cut to 16 KiB each, with ` [truncated]` added. The exception trace is cut to 20 frames, and `previous` is dropped.
-2. If the line is still too long, only `exception`, `cloud_request_id` and a `truncated` note are kept.
-3. If it is still too long, `context` keeps only the note, and `channel` and the logger name are cut to 16 KiB.
-
-The 256 KiB budget includes the trailing newline. Cuts count UTF-8 bytes and never split a character.
-
-The result is always valid JSON at the right level.
-
-### Why only these seven top-level keys
-
-The platform picks the record type from top-level keys:
-
-- `source: "nginx-app"` makes the line a fake access log;
-- `logger: "http.log.access.log0"` makes it a Caddy access log;
-- `_cloud_event` takes the line out of the logs;
-- `context` selects the Laravel path.
-
-So your `extra=` fields always go inside `context`, and can never reach the top level. The platform truncates records over 1 MB, and they become plain text at info level, so the 256 KiB cap keeps a large record structured. Evidence: [SE-295](https://linear.app/laravel/issue/SE-295) and its comments.
-
-## Transport and fallback
-
-- **On Cloud** (`LARAVEL_CLOUD=1`), lines go to `LARAVEL_CLOUD_LOG_SOCKET`. When that variable is not set, they go to `unix:///tmp/cloud-init.sock`. Python containers do not set the variable, but the socket exists. Supported addresses are `unix://path`, `tcp://host:port` and `host:port`.
-- **Why a socket:** every process in a Cloud container shares one stdout pipe. In a live test, 8 processes writing 60 KB lines to stdout corrupted 29 of 40 lines. Through the socket, all 40 lines arrived intact, because cloud-init writes one line at a time. See [SE-301](https://linear.app/laravel/issue/SE-301).
-- **Connection:**
-  - one `sendall` per record, under the handler lock, with a 2 s timeout;
-  - it connects on the first record;
-  - it reconnects after `fork()`, so Gunicorn workers never share the parent's socket;
-  - after a connect or send failure, it waits 5 s before it tries again.
-- **Fallback:** if the socket fails, or when you are not on Cloud, the whole line goes to `sys.__stdout__` in one write, followed by a flush.
-- The platform splits socket lines over 2 MiB. The 256 KiB cap prevents this.
+Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exception with its class, message, file, trace and the full `previous` chain (`raise ... from ...`).
 
 ## Limits
 
-- Anything printed before `configure()` runs is still plain text at info level. This includes interpreter crash output and server boot lines. uWSGI's C-level lines (its boot banner, worker spawns) never go through Python logging, so they are always plain text.
-- The dashboard cannot show whether a line came from stdout or stderr.
+- Output from before `configure()` runs is plain text. This includes server boot lines and interpreter crashes. uWSGI's own boot lines are always plain text.
 - There is no redaction. Keep secrets out of messages and `extra=` fields.
-- Not in scope: Laravel's Exceptions feature (`_cloud_event: exception`), which is Laravel-only for now.
+- Laravel's Exceptions feature is not supported yet.
+
+## How it works
+
+Each record is one JSON line with the keys `message`, `context`, `level`, `level_name`, `channel`, `datetime` and `extra`. Your `extra=` fields always go inside `context`. The package never adds other top-level keys, because Cloud uses top-level keys to choose how to parse a line.
+
+- **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole. If the socket fails, or you are not on Cloud, lines go to stdout.
+- **Size cap:** Each line is at most 256 KiB. Long messages and traces are cut first, then extra context. Cloud turns records over 1 MB into plain text, so this cap keeps large records structured.
+- **Channel:** `APP_ENV`, then `LARAVEL_CLOUD_ENV_NAME`, then `local`.
 
 ## Development
 
 ```sh
-uv run pytest -q                            # tests
+uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 uv run ty check && uv run mypy && uv run pyright
 uv run coverage run -m pytest -q && uv run coverage combine && uv run coverage report
 ```
 
-CI runs ruff, the three type checkers (on Python 3.10) and the tests on Python 3.10 to 3.15. It then combines coverage from every version and fails under 100% line and branch coverage, so a single local run can show version-specific branches as missed. The framework packages and type stubs are dev-only dependencies.
+CI runs the tests on Python 3.10 to 3.15 and requires 100% line and branch coverage across all versions combined. One local run can show version-specific branches as missed.
 
 ### Live check on Laravel Cloud
 
-1. Run `python scripts/live_check.py command <env>`. It prints a `cpx cloud command:run` command and a marker. The command carries the package inside `--cmd`, so you do not need to deploy anything.
-2. Run the printed command. It prints the marker and a `from`/`to` window. `command:run` output itself is never logged, but lines sent to the socket are.
-3. Run `python scripts/live_check.py verify <app> <env> <marker> <from> <to>`. It checks:
-   - every entry has type `application`, with the right levels;
-   - there is exactly one exception entry, with its chain;
-   - the request ID is present;
-   - 40 of 40 concurrent lines arrived whole;
-   - the 600 KB record is still JSON at warning level.
-
-   The logs API returns at most 100 rows per call, so the script reads in small windows.
-
-   The dashboard shows a logged exception under its log message, with the whole `exception` chain (including `previous`) in the details panel. The logs API returns it differently: as a separate entry of type `exception`, with the exception's message as the entry message, and only `class`, `code`, `file` and `trace` as data. So check the chain in the dashboard, not the API.
-4. Check the dashboard Logs page by hand: the level tags and colours, and the exception chain in the details panel.
+1. Run `python scripts/live_check.py command <env>`. It prints a `cpx cloud command:run` command and a marker. You do not need to deploy anything.
+2. Run the printed command. It prints the marker and a `from`/`to` time window.
+3. Run `python scripts/live_check.py verify <app> <env> <marker> <from> <to>`. It checks levels, the exception, the request ID, concurrent writes and the size cap.
+4. On the dashboard Logs page, check the level colours and the exception chain. The logs API does not return the `previous` chain, so check it in the dashboard.
 
 Run the check on a shared (Flex) environment and on a private one.
 
 ### Releasing
 
-Publishing uses PyPI trusted publishing (OIDC), so the repo stores no tokens. See `.github/workflows/publish.yml`.
+Publishing uses PyPI trusted publishing. See `.github/workflows/publish.yml`.
 
 1. Set `version` in `pyproject.toml`, run `uv lock`, and merge to `main`.
-2. Publish to TestPyPI: run the **Publish** workflow manually on `main` (`gh workflow run publish.yml --ref main`).
-3. Publish to PyPI: create a GitHub release tagged `v<version>` (`gh release create v0.0.1 --generate-notes`). The `pypi` job waits for approval in the `pypi` environment.
+2. TestPyPI: `gh workflow run publish.yml --ref main`.
+3. PyPI: `gh release create v<version> --generate-notes`, then approve the `pypi` environment.
 
 ## License
 
