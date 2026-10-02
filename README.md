@@ -105,8 +105,8 @@ Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exc
 
 Each record is one JSON line with the keys `message`, `context`, `level`, `level_name`, `channel`, `datetime` and `extra`. Your `extra=` fields always go inside `context`. The package never adds other top-level keys, because Cloud uses top-level keys to choose how to parse a line.
 
-- **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole ([SE-301](https://linear.app/laravel/issue/SE-301)). If the socket fails, or you are not on Cloud, lines go to stdout.
-- **Size cap:** Each line is at most 256 KiB. Long messages and traces are cut first, then extra context. Cloud turns records over 1 MB into plain text, so this cap keeps large records structured ([SE-295](https://linear.app/laravel/issue/SE-295)).
+- **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole. If the socket fails, or you are not on Cloud, lines go to stdout.
+- **Size cap:** Each line is at most 256 KiB. Long messages and traces are cut first, then extra context. Cloud turns records over 1 MB into plain text, so this cap keeps large records structured.
 - **Channel:** `APP_ENV`, then `LARAVEL_CLOUD_ENV_NAME`, then `local`.
 
 ## Development
