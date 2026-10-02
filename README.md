@@ -16,7 +16,7 @@ from laravel_cloud_logging import configure
 
 configure()
 
-logging.getLogger(__name__).info("Order shipped", extra={"order_id": 42})
+logging.getLogger(__name__).info('Order shipped', extra={'order_id': 42})
 ```
 
 Call `configure()` once, as early as possible at startup. Then log with the standard `logging` module. Your app needs no other changes.
