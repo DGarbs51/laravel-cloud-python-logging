@@ -1,23 +1,34 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "laravel-cloud-logging"
-version = "0.1.0"
+version = "0.0.1"
 description = "Laravel-style (Monolog JSON) logging for Python apps on Laravel Cloud"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = []
+keywords = ["laravel", "laravel-cloud", "logging", "monolog", "json", "django", "flask", "fastapi"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: System :: Logging",
 ]
 
 [project.urls]
-Source = "https://github.com/DGarbs51/laravel-cloud-python-logging"
+Homepage = "https://github.com/DGarbs51/laravel-cloud-python-logging"
 
 [dependency-groups]
 test = ["pytest", "flask", "starlette", "httpx", "django", "celery", "gunicorn", "rq", "uvicorn"]

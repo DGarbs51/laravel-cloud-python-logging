@@ -26,8 +26,9 @@ configure(level=None, *, exceptions=True, access_logs=False)
 - `exceptions=False`: do not install the uncaught-exception hooks.
 - `access_logs=True`: keep app-server access logs. They are off by default because Cloud's nginx already logs every request, with its status and timing.
 
-> **Status:** not on PyPI yet, and the package name is not final. Until it is published, install from Git:
-> `pip install "laravel-cloud-logging @ git+https://github.com/DGarbs51/laravel-cloud-python-logging"`
+```sh
+pip install laravel-cloud-logging
+```
 
 ## Framework setup
 
@@ -161,6 +162,14 @@ CI runs the tests on Python 3.10 to 3.14. The framework packages are test-only d
 4. Check the dashboard Logs page by hand: the level tags and colours, and the exception chain in the details panel.
 
 Run the check on a shared (Flex) environment and on a private one.
+
+### Releasing
+
+Publishing uses PyPI trusted publishing (OIDC), so the repo stores no tokens. See `.github/workflows/publish.yml`.
+
+1. Set `version` in `pyproject.toml`, run `uv lock`, and merge to `main`.
+2. Publish to TestPyPI: run the **Publish** workflow manually on `main` (`gh workflow run publish.yml --ref main`).
+3. Publish to PyPI: create a GitHub release tagged `v<version>` (`gh release create v0.0.1 --generate-notes`). The `pypi` job waits for approval in the `pypi` environment.
 
 ## License
 
