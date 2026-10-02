@@ -40,9 +40,9 @@ def emit(marker):
                                      'logger': 'http.log.access.log0', '_cloud_event': 'exception'})
     try:
         try:
-            raise KeyError('inner')
+            raise KeyError(f'inner {marker}')
         except KeyError as inner:
-            raise RuntimeError('outer') from inner
+            raise RuntimeError(f'outer {marker}') from inner
     except RuntimeError:
         log.exception(f'{tag} exception')
     token = lcl.cloud_request_id.set(f'req-{marker}')
@@ -97,12 +97,17 @@ def verify(app, env, marker, start, end):
     entries, seen = [], set()
     while low < high:
         stop = min(low + timedelta(seconds=5), high)
-        for e in fetch(app, env, low, stop):
-            key = json.dumps(e, sort_keys=True)
-            if key not in seen and f'live {marker}' in str(e.get('message', '')):
-                seen.add(key)
-                entries.append(e)
+        # Windows share their boundary second: drop rows an earlier window returned, but keep
+        # identical rows within one response (each thread logs the same line 5 times).
+        batch = [e for e in fetch(app, env, low, stop) if marker in str(e.get('message', ''))]
+        keys = [json.dumps(e, sort_keys=True) for e in batch]
+        entries += [e for e, key in zip(batch, keys) if key not in seen]
+        seen.update(keys)
         low = stop
+    # The platform stores an exception record as its own entry: type 'exception', the
+    # exception's message as the entry message, and class/code/file/trace as data.
+    exceptions = [e for e in entries if e.get('type') == 'exception']
+    entries = [e for e in entries if e.get('type') != 'exception']
     tag = f'live {marker} '
     by_case = {}
     for e in entries:
@@ -112,20 +117,22 @@ def verify(app, env, marker, start, end):
         'all_application': sorted({e.get('type') for e in entries}) == ['application'],
         'levels_seen': levels,
         'all_levels_present': sorted(levels) == sorted(LEVELS),
-        'one_exception_entry': len(by_case.get('exception', [])) == 1,
-        'exception_has_chain': 'previous' in json.dumps(by_case.get('exception', [{}])[0]),
+        'one_exception_entry': [e.get('message') for e in exceptions] == [f'outer {marker}'],
+        'exception_level_error': [e.get('level') for e in exceptions] == ['error'],
         'request_id_present': f'req-{marker}' in json.dumps(by_case.get('request', [])),
         'extra_kept_in_context': len(by_case.get('extra', [])) == 1,
         'concurrent_40': len(by_case.get('concurrent', [])) == 40,
         'concurrent_whole': all(e['message'].endswith('p' * 100) for e in by_case.get('concurrent', [])),
         'large_record_json_at_warning': [e.get('level') for e in by_case.get('large', [])] == ['warning'],
-        'entries': len(entries),
+        'entries': len(entries) + len(exceptions),
+        # Informational: the logs API returns class/code/file/trace only; check the chain in the dashboard.
+        'api_exception_has_previous': 'previous' in json.dumps(exceptions),
     }
     print(json.dumps(results, indent=2))
-    for case in ('exception', 'large', 'extra'):
-        sample = by_case.get(case, [{}])[0]
+    for case, rows in (('exception', exceptions), ('large', by_case.get('large')), ('extra', by_case.get('extra'))):
+        sample = (rows or [{}])[0]
         print(f'--- {case} entry:\n' + json.dumps(sample, ensure_ascii=False)[:2000])
-    checks = [v for k, v in results.items() if isinstance(v, bool)]
+    checks = [v for k, v in results.items() if isinstance(v, bool) and not k.startswith('api_')]
     sys.exit(0 if all(checks) else 1)
 
 
