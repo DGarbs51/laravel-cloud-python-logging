@@ -159,6 +159,8 @@ CI runs the tests on Python 3.10 to 3.14. The framework packages are test-only d
    - the 600 KB record is still JSON at warning level.
 
    The logs API returns at most 100 rows per call, so the script reads in small windows.
+
+   The platform stores a logged exception as its own entry: type `exception`, with the exception's message as the entry message (not the log message), and `class`, `code`, `file` and `trace` as data. The logs API does not return `previous`, so check the chain in the dashboard.
 4. Check the dashboard Logs page by hand: the level tags and colours, and the exception chain in the details panel.
 
 Run the check on a shared (Flex) environment and on a private one.
