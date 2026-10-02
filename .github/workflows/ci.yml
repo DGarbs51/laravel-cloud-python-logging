@@ -90,6 +90,8 @@ jobs:
         run: unzip -p dist/*.whl '*/METADATA' | (! grep -q '^Requires-Dist')
       - name: Wheel ships the py.typed marker
         run: unzip -l dist/*.whl | grep -q 'laravel_cloud_logging/py.typed$'
+      - name: Sdist ships only the package, README and LICENSE
+        run: (! tar tzf dist/*.tar.gz | grep -vE '^[^/]+/(src/|README.md$|LICENSE$|pyproject.toml$|PKG-INFO$|.gitignore$)')
 
   ci:
     if: always()
