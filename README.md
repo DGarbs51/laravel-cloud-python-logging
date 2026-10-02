@@ -10,10 +10,10 @@ configure()
 
 Call `configure()` once, as early as possible at startup. It:
 
-- replaces existing handlers on the root logger and on common framework loggers (`uvicorn`, `gunicorn`, `celery`, `django`, `werkzeug`, `asyncio`, `rq.worker`, `py.warnings`), and makes those loggers propagate to root;
+- replaces existing handlers on the root logger and on common framework loggers (`uvicorn`, `gunicorn`, `hypercorn`, `granian`, `waitress`, `celery`, `django`, `werkzeug`, `asyncio`, `rq.worker`, `py.warnings`), and makes those loggers propagate to root;
 - captures `warnings`;
 - logs uncaught exceptions (main thread and `threading`) at CRITICAL;
-- silences `uvicorn.access` and `gunicorn.access`;
+- silences the `uvicorn`, `gunicorn`, `hypercorn` and `granian` access loggers;
 - returns a `logging.config.dictConfig` dict, which Gunicorn can use.
 
 You can call it more than once. Logging never raises into your app.
@@ -41,6 +41,12 @@ pip install laravel-cloud-logging
 | FastAPI / Starlette | Call `configure()` and `app.add_middleware(asgi_middleware)`. Then start the server with `uvicorn.run(app, log_config=None)`. If you run several uvicorn workers, also call `configure()` in the module that defines the app. |
 | Django | In `settings.py`, set `LOGGING_CONFIG = None` and call `configure()`. Add `"laravel_cloud_logging.django.middleware"` near the top of `MIDDLEWARE`. Under ASGI, you can wrap the app in `asgi.py` instead: `application = asgi_middleware(get_asgi_application())`. |
 | Gunicorn | In `gunicorn.conf.py`, set `logconfig_dict = configure()`. Do not set `accesslog`. |
+| Hypercorn | In `hypercorn.conf.py`, set `logconfig_dict = configure()`, and start with `hypercorn -c file:hypercorn.conf.py ...`. Without it, Hypercorn writes its own lines twice: as plain text and as JSON. |
+| Uvicorn | Covered by the FastAPI row. From the CLI, `configure()` in the app module replaces Uvicorn's handlers. |
+| Granian | Call `configure()` in the app module. Workers log as JSON. The main process (`Starting granian`, `Spawning worker-1`) still prints plain text. |
+| Waitress | Call `configure()` in the app module. Waitress adds no access log. |
+| Daphne | Call `configure()` in the app module (`asgi.py`), and start with `daphne -v 0 ...`. At the default `-v 1`, Daphne writes a plain-text access line to stdout for every request. |
+| uWSGI / pyuwsgi | Call `configure()` in the app module, and add `--disable-logging` so uWSGI does not write a plain-text line for every request. Also add `--die-on-term`: in uWSGI 2.0, `SIGTERM` reloads the server instead of stopping it. Workers forked after the app loads reconnect to the socket on their own. |
 | Celery | Call `from laravel_cloud_logging.celery import setup; setup(app)`. This sets `worker_hijack_root_logger=False` and connects `configure()` to the `setup_logging` signal with `weak=False`. Keyword arguments are passed to `configure()`. |
 | RQ | Call `configure()` before or after the worker sets up its logging. Both orders work, because `configure()` also clears the handlers on `rq.worker`. |
 | `laravel-cloud-queues` | Call `configure()` before you start the worker. The worker calls `basicConfig` only when root has no handlers, so it keeps yours. Note: the worker's JSON job-event lines have no `level` or `message` today, so the dashboard shows them as plain entries. |
@@ -134,7 +140,7 @@ So your `extra=` fields always go inside `context`, and can never reach the top 
 
 ## Limits
 
-- Anything printed before `configure()` runs is still plain text at info level. This includes interpreter crash output and server boot lines.
+- Anything printed before `configure()` runs is still plain text at info level. This includes interpreter crash output and server boot lines. uWSGI's C-level lines (its boot banner, worker spawns) never go through Python logging, so they are always plain text.
 - The dashboard cannot show whether a line came from stdout or stderr.
 - There is no redaction. Keep secrets out of messages and `extra=` fields.
 - Not in scope: Laravel's Exceptions feature (`_cloud_event: exception`), which is Laravel-only for now.

@@ -31,7 +31,7 @@ classifiers = [
 Homepage = "https://github.com/DGarbs51/laravel-cloud-python-logging"
 
 [dependency-groups]
-test = ["pytest", "flask", "starlette", "httpx", "django", "celery", "gunicorn", "rq", "uvicorn"]
+test = ["pytest", "flask", "starlette", "httpx", "django", "celery", "gunicorn", "rq", "uvicorn", "hypercorn", "granian", "waitress"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
