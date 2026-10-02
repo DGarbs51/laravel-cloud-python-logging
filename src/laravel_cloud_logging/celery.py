@@ -1,12 +1,30 @@
 """Celery: call setup(app) where the Celery app is created."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from . import configure
 
+if TYPE_CHECKING:
+    from typing import TypedDict
 
-def setup(app, **kwargs):
+    from celery import Celery, Task
+    from typing_extensions import Unpack
+
+    class _ConfigureKwargs(TypedDict, total=False):
+        level: int | str | None
+        exceptions: bool
+        access_logs: bool
+
+
+def setup(app: Celery[Task[[], object]], **kwargs: Unpack[_ConfigureKwargs]) -> None:
     """Stop Celery replacing root handlers and run configure(**kwargs) when it sets up logging."""
     from celery.signals import setup_logging
 
+    def receiver(**_: object) -> dict[str, object]:
+        return configure(**kwargs)
+
     app.conf.worker_hijack_root_logger = False
-    # weak=False: a lambda has no other reference and would be garbage collected.
-    setup_logging.connect(lambda **_: configure(**kwargs), weak=False)
+    # weak=False: the local function has no other reference and would be garbage collected.
+    setup_logging.connect(receiver, weak=False)

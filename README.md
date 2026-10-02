@@ -148,10 +148,13 @@ So your `extra=` fields always go inside `context`, and can never reach the top 
 ## Development
 
 ```sh
-uv run --python 3.14 --group test pytest -q
+uv run pytest -q                            # tests
+uv run ruff check . && uv run ruff format --check .
+uv run ty check && uv run mypy && uv run pyright
+uv run coverage run -m pytest -q && uv run coverage combine && uv run coverage report
 ```
 
-CI runs the tests on Python 3.10 to 3.14. The framework packages are test-only dependencies.
+CI runs ruff, the three type checkers (on Python 3.10) and the tests on Python 3.10 to 3.14. It then combines coverage from every version and fails under 100% line and branch coverage, so a single local run can show version-specific branches as missed. The framework packages and type stubs are dev-only dependencies.
 
 ### Live check on Laravel Cloud
 
