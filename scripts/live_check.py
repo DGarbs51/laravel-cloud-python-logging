@@ -23,11 +23,12 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, NoReturn
 
 LEVELS = ('DEBUG', 'INFO', 'NOTICE', 'WARNING', 'ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY')
 
 
-def emit(marker):
+def emit(marker: str) -> None:
     import laravel_cloud_logging as lcl
 
     lcl.configure('DEBUG')
@@ -36,8 +37,16 @@ def emit(marker):
     start = datetime.now(timezone.utc)
     for name in LEVELS:
         log.log(logging.getLevelName(name), f'{tag} level {name}')
-    log.info(f'{tag} extra', extra={'order_id': 7, 'source': 'nginx-app', 'context': 'x',
-                                     'logger': 'http.log.access.log0', '_cloud_event': 'exception'})
+    log.info(
+        f'{tag} extra',
+        extra={
+            'order_id': 7,
+            'source': 'nginx-app',
+            'context': 'x',
+            'logger': 'http.log.access.log0',
+            '_cloud_event': 'exception',
+        },
+    )
     try:
         try:
             raise KeyError(f'inner {marker}')
@@ -49,20 +58,29 @@ def emit(marker):
     log.info(f'{tag} request')
     lcl.cloud_request_id.reset(token)
     log.warning(f'{tag} large', extra={'blob': 'x' * 600_000})
-    threads = [threading.Thread(target=lambda i=i: [log.info(f'{tag} concurrent {i} {"p" * 20000}') for _ in range(5)])
-               for i in range(8)]
+    threads = [
+        threading.Thread(target=lambda i=i: [log.info(f'{tag} concurrent {i} {"p" * 20000}') for _ in range(5)])
+        for i in range(8)
+    ]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     logging.shutdown()
     end = datetime.now(timezone.utc)
-    print(json.dumps({'marker': marker, 'from': start.isoformat(timespec='seconds'),
-                      'to': (end + timedelta(seconds=2)).isoformat(timespec='seconds'),
-                      'handler_address': lcl.CloudHandler().address}))
+    print(
+        json.dumps(
+            {
+                'marker': marker,
+                'from': start.isoformat(timespec='seconds'),
+                'to': (end + timedelta(seconds=2)).isoformat(timespec='seconds'),
+                'handler_address': lcl.CloudHandler().address,
+            }
+        )
+    )
 
 
-def command(env):
+def command(env: str) -> None:
     """Bundle the package and this script into a zipapp and print the command:run line."""
     root = Path(__file__).resolve().parents[1]
     buf = io.BytesIO()
@@ -72,16 +90,31 @@ def command(env):
             z.write(path, f'laravel_cloud_logging/{path.name}')
     payload = base64.b64encode(buf.getvalue()).decode()
     marker = uuid.uuid4().hex[:12]
-    inner = (f"python3 -c 'import base64;open(\"/tmp/lcl-live.pyz\",\"wb\").write(base64.b64decode(\"{payload}\"))'"
-             f' && python3 /tmp/lcl-live.pyz emit {marker}')
+    inner = (
+        f'python3 -c \'import base64;open("/tmp/lcl-live.pyz","wb").write(base64.b64decode("{payload}"))\''
+        f' && python3 /tmp/lcl-live.pyz emit {marker}'
+    )
     print('cpx cloud command:run', shlex.quote(env), shlex.quote(f'--cmd={inner}'))
     print(f'# marker: {marker}', file=sys.stderr)
 
 
-def fetch(app, env, low, high):
+def fetch(app: str, env: str, low: datetime, high: datetime) -> list[dict[str, Any]]:
     """Collect a window; the API returns at most 100 rows, so split until under the cap."""
-    out = subprocess.run(['cpx', 'cloud', 'environment:logs', app, env, f'--from={low.isoformat()}',
-                          f'--to={high.isoformat()}', '--json'], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(
+        [
+            'cpx',
+            'cloud',
+            'environment:logs',
+            app,
+            env,
+            f'--from={low.isoformat()}',
+            f'--to={high.isoformat()}',
+            '--json',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     batch = json.loads(out)
     batch = batch.get('logs', []) if isinstance(batch, dict) else batch  # empty window: {"logs": []}
     if len(batch) >= 100 and (high - low).total_seconds() > 1:
@@ -92,7 +125,7 @@ def fetch(app, env, low, high):
     return batch
 
 
-def verify(app, env, marker, start, end):
+def verify(app: str, env: str, marker: str, start: str, end: str) -> NoReturn:
     low, high = datetime.fromisoformat(start), datetime.fromisoformat(end)
     entries, seen = [], set()
     while low < high:
@@ -101,7 +134,7 @@ def verify(app, env, marker, start, end):
         # identical rows within one response (each thread logs the same line 5 times).
         batch = [e for e in fetch(app, env, low, stop) if marker in str(e.get('message', ''))]
         keys = [json.dumps(e, sort_keys=True) for e in batch]
-        entries += [e for e, key in zip(batch, keys) if key not in seen]
+        entries += [e for e, key in zip(batch, keys, strict=True) if key not in seen]
         seen.update(keys)
         low = stop
     # The platform stores an exception record as its own entry: type 'exception', the
@@ -111,8 +144,8 @@ def verify(app, env, marker, start, end):
     tag = f'live {marker} '
     by_case = {}
     for e in entries:
-        by_case.setdefault(e['message'][len(tag):].split(' ')[0], []).append(e)
-    levels = {e['message'][len(tag) + 6:]: e.get('level') for e in by_case.get('level', [])}
+        by_case.setdefault(e['message'][len(tag) :].split(' ')[0], []).append(e)
+    levels = {e['message'][len(tag) + 6 :]: e.get('level') for e in by_case.get('level', [])}
     results = {
         'all_application': sorted({e.get('type') for e in entries}) == ['application'],
         'levels_seen': levels,

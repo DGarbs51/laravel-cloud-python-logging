@@ -77,8 +77,15 @@ def captured_stdout():
 
 
 def fmt(**kwargs):
-    record = logging.LogRecord('app.billing', kwargs.pop('level', logging.INFO), __file__, 1,
-                               kwargs.pop('msg', 'hello %s'), kwargs.pop('args', ('world',)),
-                               kwargs.pop('exc_info', None), sinfo=kwargs.pop('stack_info', None))
+    record = logging.LogRecord(
+        'app.billing',
+        kwargs.pop('level', logging.INFO),
+        __file__,
+        1,
+        kwargs.pop('msg', 'hello %s'),
+        kwargs.pop('args', ('world',)),
+        kwargs.pop('exc_info', None),
+        sinfo=kwargs.pop('stack_info', None),
+    )
     record.__dict__.update(kwargs)
     return json.loads(MonologFormatter(channel='production').format(record))

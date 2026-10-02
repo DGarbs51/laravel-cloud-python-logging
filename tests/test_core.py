@@ -6,32 +6,54 @@ import socket
 import sys
 import threading
 import warnings
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
+from helpers import KEYS, Collector, captured_stdout, fmt
 
 import laravel_cloud_logging as lcl
 from laravel_cloud_logging import CloudHandler, MonologFormatter, configure
-from helpers import KEYS, Collector, captured_stdout, fmt
 
 
 def test_key_order_and_reserved_keys_stay_in_context():
     entry = fmt(order_id=1842, source='nginx-app', logger='http.log.access.log0', context='x', _cloud_event='exception')
     assert list(entry) == KEYS
-    assert entry['message'] == 'hello world' and entry['channel'] == 'production'
+    assert entry['message'] == 'hello world'
+    assert entry['channel'] == 'production'
     assert entry['extra'] == {'logger': 'app.billing'}
     # Fields that would misclassify a line on Cloud stay inside context.
-    assert entry['context'] == {'order_id': 1842, 'source': 'nginx-app', 'logger': 'http.log.access.log0',
-                                'context': 'x', '_cloud_event': 'exception'}
-    assert entry['datetime'].endswith('+00:00') and len(entry['datetime'].split('.')[1]) == 12
+    assert entry['context'] == {
+        'order_id': 1842,
+        'source': 'nginx-app',
+        'logger': 'http.log.access.log0',
+        'context': 'x',
+        '_cloud_event': 'exception',
+    }
+    assert entry['datetime'].endswith('+00:00')
+    assert len(entry['datetime'].split('.')[1]) == 12
     assert fmt()['context'] == {}
 
 
-@pytest.mark.parametrize('py, number, name', [
-    (5, 100, 'DEBUG'), (10, 100, 'DEBUG'), (20, 200, 'INFO'), (25, 250, 'NOTICE'), (30, 300, 'WARNING'),
-    (40, 400, 'ERROR'), (50, 500, 'CRITICAL'), (55, 550, 'ALERT'), (60, 600, 'EMERGENCY'), (70, 600, 'EMERGENCY'),
-    (-1, 100, 'DEBUG'), (0, 100, 'DEBUG'), (35, 300, 'WARNING'), (59, 550, 'ALERT'),
-])
+@pytest.mark.parametrize(
+    ('py', 'number', 'name'),
+    [
+        (5, 100, 'DEBUG'),
+        (10, 100, 'DEBUG'),
+        (20, 200, 'INFO'),
+        (25, 250, 'NOTICE'),
+        (30, 300, 'WARNING'),
+        (40, 400, 'ERROR'),
+        (50, 500, 'CRITICAL'),
+        (55, 550, 'ALERT'),
+        (60, 600, 'EMERGENCY'),
+        (70, 600, 'EMERGENCY'),
+        (-1, 100, 'DEBUG'),
+        (0, 100, 'DEBUG'),
+        (35, 300, 'WARNING'),
+        (59, 550, 'ALERT'),
+    ],
+)
 def test_level_mapping(py, number, name):
     entry = fmt(level=py)
     assert (entry['level'], entry['level_name']) == (number, name)
@@ -51,11 +73,22 @@ def test_normalization():
         def __str__(self):
             raise ValueError
 
-    entry = fmt(msg='multi\nline 雪', args=(), nan=float('nan'), inf=float('-inf'), obj=object(),
-                bad=Unprintable(), nested={'a': {'b': (1, 2)}})
-    assert entry['message'] == 'multi\nline 雪' and entry['context']['nan'] == 'nan'
+    entry = fmt(
+        msg='multi\nline 雪',
+        args=(),
+        nan=float('nan'),
+        inf=float('-inf'),
+        obj=object(),
+        bad=Unprintable(),
+        nested={'a': {'b': (1, 2)}},
+        when=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+    )
+    assert entry['message'] == 'multi\nline 雪'
+    assert entry['context']['when'] == '2026-01-02T03:04:05+00:00'
+    assert entry['context']['nan'] == 'nan'
     assert entry['context']['inf'] == '-inf'
-    assert entry['context']['obj'].startswith('<object') and entry['context']['nested'] == {'a': {'b': [1, 2]}}
+    assert entry['context']['obj'].startswith('<object')
+    assert entry['context']['nested'] == {'a': {'b': [1, 2]}}
     assert entry['context']['bad'] == '[unprintable Unprintable]'
     deep = node = {}
     for _ in range(12):
@@ -63,7 +96,8 @@ def test_normalization():
     assert 'Over 9 levels deep, aborting normalization' in json.dumps(fmt(deep=deep)['context'])
     assert fmt(many=list(range(1500)))['context']['many'][-1] == 'Over 1000 items (1500 total), aborting normalization'
     many = fmt(many={i: i for i in range(1500)})['context']['many']
-    assert len(many) == 1001 and many['...'].startswith('Over 1000 items')
+    assert len(many) == 1001
+    assert many['...'].startswith('Over 1000 items')
 
 
 def test_stack_info():
@@ -81,9 +115,13 @@ def test_exception_chain_and_code():
     entry = fmt(level=logging.ERROR, msg='Payment failed', args=(), exc_info=exc_info)
     exc = entry['context']['exception']
     assert set(exc) == {'class', 'message', 'code', 'file', 'trace', 'previous'}
-    assert exc['class'] == 'RuntimeError' and exc['message'] == 'outer' and exc['code'] == 0
-    assert exc['file'].startswith(__file__ + ':') and ' in test_exception_chain_and_code' in exc['trace'][0]
-    assert exc['previous']['class'] == 'KeyError' and exc['previous']['message'] == "'inner'"
+    assert exc['class'] == 'RuntimeError'
+    assert exc['message'] == 'outer'
+    assert exc['code'] == 0
+    assert exc['file'].startswith(__file__ + ':')
+    assert ' in test_exception_chain_and_code' in exc['trace'][0]
+    assert exc['previous']['class'] == 'KeyError'
+    assert exc['previous']['message'] == "'inner'"
     assert 'previous' not in exc['previous']
 
     for raised, code in ((OSError(2, 'missing'), 2), (ValueError(True), 0), (ValueError('x'), 0)):
@@ -99,7 +137,8 @@ def test_exception_chain_and_code():
             raise lcl.socket.timeout('suppressed') from None  # module-qualified, context suppressed
     except Exception:
         exc = fmt(exc_info=sys.exc_info())['context']['exception']
-    assert exc['class'] == 'TimeoutError' and 'previous' not in exc
+    assert exc['class'] == 'TimeoutError'
+    assert 'previous' not in exc
 
     class Custom(Exception):
         pass
@@ -108,8 +147,10 @@ def test_exception_chain_and_code():
     a.__context__, b.__context__ = b, a  # a cycle must terminate
     exc = fmt(exc_info=(Custom, a, None))['context']['exception']
     assert exc['class'].endswith('test_exception_chain_and_code.<locals>.Custom')
-    assert exc['previous']['class'] == 'ValueError' and 'previous' not in exc['previous']
-    assert exc['trace'] == [] and exc['file'] == ''
+    assert exc['previous']['class'] == 'ValueError'
+    assert 'previous' not in exc['previous']
+    assert exc['trace'] == []
+    assert exc['file'] == ''
 
 
 def test_trace_capped_at_100_frames():
@@ -122,7 +163,8 @@ def test_trace_capped_at_100_frames():
         recurse(150)
     except ValueError:
         trace = fmt(exc_info=sys.exc_info())['context']['exception']['trace']
-    assert len(trace) == 100 and ' in recurse' in trace[0]
+    assert len(trace) == 100
+    assert ' in recurse' in trace[0]
 
 
 def test_size_cap():
@@ -130,12 +172,17 @@ def test_size_cap():
         return len(json.dumps(entry, ensure_ascii=False, separators=(',', ':')).encode())
 
     big = fmt(level=logging.ERROR, big='x' * 600_000, small='ok')
-    assert line(big) <= 256 * 1024 and list(big) == KEYS and big['level_name'] == 'ERROR'
-    assert big['message'] == 'hello world' and big['context']['small'] == 'ok'  # only cut fields get the marker
-    assert big['context']['big'].endswith(' [truncated]') and len(big['context']['big']) == 16384 + 12
+    assert line(big) <= 256 * 1024
+    assert list(big) == KEYS
+    assert big['level_name'] == 'ERROR'
+    assert big['message'] == 'hello world'
+    assert big['context']['small'] == 'ok'
+    assert big['context']['big'].endswith(' [truncated]')
+    assert len(big['context']['big']) == 16384 + 12
 
     msg = fmt(msg='y' * 600_000, args=())
-    assert line(msg) <= 256 * 1024 and msg['message'].endswith(' [truncated]')
+    assert line(msg) <= 256 * 1024
+    assert msg['message'].endswith(' [truncated]')
 
     try:
         raise ValueError('boom')
@@ -146,12 +193,14 @@ def test_size_cap():
         many = fmt(level=logging.CRITICAL, blob=['z' * 1000] * 900, exc_info=exc_info)
     finally:
         lcl.cloud_request_id.reset(token)
-    assert line(many) <= 256 * 1024 and many['level_name'] == 'CRITICAL'
+    assert line(many) <= 256 * 1024
+    assert many['level_name'] == 'CRITICAL'
     assert set(many['context']) == {'exception', 'cloud_request_id', 'truncated'}
     assert many['context']['exception']['message'] == 'boom'
 
     wide = fmt(**{f'k{i}': 'w' * 15000 for i in range(30)})  # many fields under 16 KiB each
-    assert line(wide) <= 256 * 1024 and 'truncated' in wide['context']
+    assert line(wide) <= 256 * 1024
+    assert 'truncated' in wide['context']
 
 
 def test_formatter_failure_still_emits_json():
@@ -161,7 +210,8 @@ def test_formatter_failure_still_emits_json():
 
     record = Broken('x', logging.WARNING, __file__, 1, 'm', (), None)
     entry = json.loads(MonologFormatter().format(record))
-    assert entry['message'] == 'log record formatting failed' and entry['level_name'] == 'WARNING'
+    assert entry['message'] == 'log record formatting failed'
+    assert entry['level_name'] == 'WARNING'
 
 
 def test_socket_transport_concurrency_and_repeat_configure():
@@ -171,14 +221,17 @@ def test_socket_transport_concurrency_and_repeat_configure():
         configure()
         config = configure()
         assert config['handlers']['cloud']['()'] is CloudHandler
-        assert len(logging.getLogger().handlers) == 1 and logging.getLogger().level == logging.DEBUG
+        assert len(logging.getLogger().handlers) == 1
+        assert logging.getLogger().level == logging.DEBUG
 
         logging.getLogger('uvicorn.error').info('routed')
         logging.getLogger('uvicorn.access').info('GET / 200')  # nginx already logs requests
         logging.getLogger('gunicorn.access').info('GET / 200')
         logging.log(lcl.NOTICE, 'notice level')
-        threads = [threading.Thread(target=lambda i=i: [logging.info('t%s %s', i, 'p' * 20000) for _ in range(5)])
-                   for i in range(8)]
+        threads = [
+            threading.Thread(target=lambda i=i: [logging.info('t%s %s', i, 'p' * 20000) for _ in range(5)])
+            for i in range(8)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -188,7 +241,8 @@ def test_socket_transport_concurrency_and_repeat_configure():
         assert lines[1]['level_name'] == 'NOTICE'
         assert not any('GET /' in line['message'] for line in lines)
         concurrent = [line for line in lines if line['message'].startswith('t')]
-        assert len(concurrent) == 40 and all(len(line['message']) == 20003 for line in concurrent)
+        assert len(concurrent) == 40
+        assert all(len(line['message']) == 20003 for line in concurrent)
         assert stdout() == []
     collector.close()
 
@@ -232,8 +286,10 @@ def test_request_id_in_context():
 
 def test_fallback_to_stdout_after_socket_loss_and_retry_delay():
     collector = Collector()
-    with patch.dict(os.environ, {'LARAVEL_CLOUD': '1', 'LARAVEL_CLOUD_LOG_SOCKET': collector.address}), \
-            captured_stdout() as stdout:
+    with (
+        patch.dict(os.environ, {'LARAVEL_CLOUD': '1', 'LARAVEL_CLOUD_LOG_SOCKET': collector.address}),
+        captured_stdout() as stdout,
+    ):
         configure(exceptions=False)
         logging.info('before')
         collector.find('before')
@@ -242,10 +298,13 @@ def test_fallback_to_stdout_after_socket_loss_and_retry_delay():
         handler.sock.close()
         logging.error('after socket loss')
         logging.warning('during retry delay')
-        assert handler.sock is None and handler.retry_at > 0
+        assert handler.sock is None
+        assert handler.retry_at > 0
         sys.__stdout__.flush()
         assert [(e['message'], e['level_name']) for e in stdout()] == [
-            ('after socket loss', 'ERROR'), ('during retry delay', 'WARNING')]
+            ('after socket loss', 'ERROR'),
+            ('during retry delay', 'WARNING'),
+        ]
 
 
 def test_unreachable_or_invalid_address_never_raises():
@@ -289,23 +348,29 @@ def test_off_cloud_writes_stdout():
         configure(exceptions=False)
         logging.warning('local %s', 'dev')
         sys.__stdout__.flush()
-        assert stdout()[0]['message'] == 'local dev' and stdout()[0]['level_name'] == 'WARNING'
+        assert stdout()[0]['message'] == 'local dev'
+        assert stdout()[0]['level_name'] == 'WARNING'
 
 
 def test_access_logs_opt_in_level_names_and_warnings():
     with patch.dict(os.environ, {'LARAVEL_CLOUD': ''}), captured_stdout() as stdout:
         configure(exceptions=False, access_logs=True, level='notice')
-        assert logging.getLevelName(25) == 'NOTICE' and logging.getLogger().level == 25
+        assert logging.getLevelName(25) == 'NOTICE'
+        assert logging.getLogger().level == 25
         logging.getLogger('uvicorn.access').log(lcl.ALERT, 'GET / 500')
         logging.info('below level')
-        warnings.warn('deprecated thing', UserWarning)
+        warnings.warn('deprecated thing', UserWarning, stacklevel=2)
         sys.__stdout__.flush()
         entries = stdout()
-        assert entries[0]['message'] == 'GET / 500' and entries[0]['level_name'] == 'ALERT'
-        assert entries[1]['extra'] == {'logger': 'py.warnings'} and 'deprecated thing' in entries[1]['message']
+        assert entries[0]['message'] == 'GET / 500'
+        assert entries[0]['level_name'] == 'ALERT'
+        assert entries[1]['extra'] == {'logger': 'py.warnings'}
+        assert 'deprecated thing' in entries[1]['message']
         assert len(entries) == 2
     configure(level='bogus', exceptions=False)
     assert logging.getLogger().level == logging.INFO
+    configure(level=logging.ERROR, exceptions=False)
+    assert logging.getLogger().level == logging.ERROR
 
 
 def test_existing_level_names_are_kept():
@@ -323,7 +388,8 @@ def test_replaces_framework_handlers():
         logging.getLogger(name).addHandler(stray)
     configure(exceptions=False)
     for name in ('django', 'rq.worker'):
-        assert logging.getLogger(name).handlers == [] and logging.getLogger(name).propagate
+        assert logging.getLogger(name).handlers == []
+        assert logging.getLogger(name).propagate
 
 
 def test_uncaught_exception_hooks():
@@ -390,7 +456,8 @@ def test_review_regressions_in_formatter():
             raise ValueError
 
     exc = fmt(exc_info=(BrokenStr, BrokenStr(), None), order=1)['context']
-    assert exc['order'] == 1 and exc['exception']['message'] == '[unprintable BrokenStr]'
+    assert exc['order'] == 1
+    assert exc['exception']['message'] == '[unprintable BrokenStr]'
 
     class Falsey(Exception):
         def __bool__(self):
@@ -401,18 +468,21 @@ def test_review_regressions_in_formatter():
     assert fmt(exc_info=(RuntimeError, outer, None))['context']['exception']['previous']['class'].endswith('Falsey')
 
     user_exception = fmt(level=logging.ERROR, blob='b' * 300_000, exception={'domain': 'user'})
-    assert user_exception['message'] == 'hello world' and user_exception['context']['exception'] == {'domain': 'user'}
+    assert user_exception['message'] == 'hello world'
+    assert user_exception['context']['exception'] == {'domain': 'user'}
 
 
 def test_size_cap_counts_bytes_and_marks_cuts():
     emoji = fmt(msg='😀' * 100_000, args=())['message']
-    assert emoji.endswith(' [truncated]') and len(emoji.encode()) <= 16384 + 12
+    assert emoji.endswith(' [truncated]')
+    assert len(emoji.encode()) <= 16384 + 12
 
     try:
         raise ValueError('z' * 300_000)
     except ValueError:
         exc = fmt(exc_info=sys.exc_info())['context']['exception']
-    assert exc['message'].endswith(' [truncated]') and len(exc['message']) == 16384 + 12
+    assert exc['message'].endswith(' [truncated]')
+    assert len(exc['message']) == 16384 + 12
 
 
 def test_handler_lines_never_exceed_256_kib():
@@ -425,7 +495,8 @@ def test_handler_lines_never_exceed_256_kib():
         sys.__stdout__.flush()
         raw = sys.__stdout__.buffer.getvalue()
         entries = stdout()
-    assert len(entries) == 3 and all(list(e) == KEYS and e['level_name'] == 'ERROR' for e in entries)
+    assert len(entries) == 3
+    assert all(list(e) == KEYS and e['level_name'] == 'ERROR' for e in entries)
     assert all(len(line) + 1 <= 256 * 1024 for line in raw.split(b'\n') if line)
 
 
@@ -461,7 +532,10 @@ def test_reconnects_after_retry_delay():
     collector = Collector()
     handler = CloudHandler(collector.address)
     handler.setFormatter(MonologFormatter())
-    record = lambda msg: logging.LogRecord('x', logging.INFO, __file__, 1, msg, (), None)
+
+    def record(msg):
+        return logging.LogRecord('x', logging.INFO, __file__, 1, msg, (), None)
+
     clock = [1000.0]
     with patch('laravel_cloud_logging.time.monotonic', lambda: clock[0]), captured_stdout() as stdout:
         handler.retry_at = 1004.0  # as if a failure happened 1 s ago
@@ -471,6 +545,7 @@ def test_reconnects_after_retry_delay():
         handler.handle(record('reconnected'))
         sys.__stdout__.flush()
         assert [e['message'] for e in stdout()] == ['waiting']
-    assert collector.find('reconnected') and handler.sock.gettimeout() == 2.0
+    assert collector.find('reconnected')
+    assert handler.sock.gettimeout() == 2.0
     handler.close()
     collector.close()

@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: System :: Logging",
 ]
 
@@ -31,7 +32,76 @@ classifiers = [
 Homepage = "https://github.com/DGarbs51/laravel-cloud-python-logging"
 
 [dependency-groups]
-test = ["pytest", "flask", "starlette", "httpx", "django", "celery", "gunicorn", "rq", "uvicorn", "hypercorn", "granian", "waitress"]
+test = [
+    "pytest", "pytest-timeout", "coverage", "flask", "starlette", "httpx", "django", "celery", "gunicorn", "rq",
+    "uvicorn", "hypercorn", "granian", "waitress",
+]
+dev = [
+    { include-group = "test" },
+    "celery-types>=0.26.0",
+    "django-stubs>=6.0.9",
+    "mypy>=2.4.0",
+    "pyright>=1.1.414",
+    "ruff>=0.16.10",
+    "ty>=0.0.84",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = ["--strict-markers", "--import-mode=importlib", "-ra"]
+timeout = 120
+
+[tool.coverage.run]
+branch = true
+parallel = true
+source = ["laravel_cloud_logging"]
+
+[tool.coverage.paths]
+source = ["src/laravel_cloud_logging", "*/site-packages/laravel_cloud_logging"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/laravel_cloud_logging"]
+strict = true
+disallow_any_explicit = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
+
+[tool.pyright]
+include = ["src/laravel_cloud_logging"]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+reportUnnecessaryTypeIgnoreComment = "error"
+
+[tool.ty.src]
+include = ["src/laravel_cloud_logging"]
+
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.rules]
+dynamic-function-decorator-return = "error"
+missing-type-argument = "error"
+unsound-return-statement = "error"
+unused-ignore-comment = "error"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "PT", "PGH", "ANN", "PYI"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
