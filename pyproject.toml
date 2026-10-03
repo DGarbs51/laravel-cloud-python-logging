@@ -46,7 +46,7 @@ include = ["src", "README.md", "LICENSE"]
 
 [dependency-groups]
 test = [
-    "pytest", "pytest-timeout", "coverage", "flask", "starlette", "httpx", "django", "celery", "gunicorn", "rq",
+    "pytest", "pytest-timeout", "coverage", "flask", "starlette", "httpx2", "django", "celery", "gunicorn", "rq",
     "uvicorn", "hypercorn", "granian", "waitress",
 ]
 dev = [
