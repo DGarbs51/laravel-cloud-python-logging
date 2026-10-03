@@ -77,6 +77,8 @@ _ACCESS = ('uvicorn.access', 'gunicorn.access', 'hypercorn.access', 'granian.acc
 _DEPTH, _ITEMS, _STRING, _TRACE, _LINE = 9, 1000, 16384, 100, 256 * 1024
 _NODES, _CHARS = 10000, 4 * _LINE  # per-record normalization budget
 _OVER = 'Over normalization budget, aborting normalization'
+# A lone surrogate (from os.fsdecode, say) can't be UTF-8; inside a JSON string it becomes the valid escape \udXXX.
+_ESCAPE = 'backslashreplace'
 _RETRY = 5  # seconds on stdout before trying the socket again
 _dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(',', ':'))
 
@@ -191,7 +193,7 @@ def _cut(value: object, limit: int = _STRING) -> object:
     """Cut a string to limit UTF-8 bytes (never mid-character), marking it when cut."""
     if not isinstance(value, str) or len(value) <= limit // 4:
         return value
-    raw = value[:limit].encode()  # never encode more than the cut keeps
+    raw = value[:limit].encode(errors='surrogatepass')  # never encode more than the cut keeps
     if len(raw) <= limit and len(value) <= limit:
         return value
     return raw[:limit].decode(errors='ignore') + ' [truncated]'
@@ -308,7 +310,7 @@ class MonologFormatter(logging.Formatter):
 
 def _fits(line: str) -> bool:
     # The budget includes the newline the handler adds.
-    return len(line.encode()) < _LINE
+    return len(line.encode(errors=_ESCAPE)) < _LINE
 
 
 class CloudHandler(logging.Handler):
@@ -348,7 +350,7 @@ class CloudHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            data = (self.format(record) + '\n').encode()
+            data = (self.format(record) + '\n').encode(errors=_ESCAPE)
         except Exception:
             with contextlib.suppress(Exception):  # e.g. sys.stderr closed
                 self.handleError(record)

@@ -199,6 +199,7 @@ def test_huge_scalars_are_sliced_before_conversion():
         (lambda: record_with(data={huge: 1}), None),
         (lambda: record_with(exc_info=(ValueError, error, None)), None),
         (lambda: logging.LogRecord('n' * 12_500_000, logging.ERROR, '', 1, 'm', (), None), None),
+        (lambda: logging.LogRecord('app', logging.ERROR, '', 1, 'x' * 12_500_000, (), None), None),
         (lambda: record_with(), MonologFormatter(channel='c' * 12_500_000)),
     ]
     for make_record, formatter in cases:
@@ -662,6 +663,68 @@ def test_handler_lines_never_exceed_256_kib():
     line = MonologFormatter(channel=nul).format(logging.LogRecord(nul, logging.ERROR, '', 1, nul, (), None))
     assert len(line.encode()) + 1 <= 256 * 1024
     assert json.loads(line)['level_name'] == 'ERROR'
+
+
+@pytest.mark.parametrize('char', ['a', 'é', '雪', '😀', '\x00', '"', '\\', 'a😀\x00', '\ud800'])
+def test_exact_size_boundaries_never_exceed_the_cap(char):
+    S, L = lcl._STRING, lcl._LINE
+
+    def check(formatter, record, **extra):
+        record.__dict__.update(extra)
+        line = formatter.format(record)
+        assert len(line.encode(errors='backslashreplace')) + 1 <= L
+        entry = json.loads(line)
+        assert list(entry) == KEYS
+        assert entry['level_name'] == 'ERROR'
+        for text in (entry['message'], entry['channel'], entry['extra']['logger']):
+            assert '\ufffd' not in text  # never cut mid-character
+        return entry
+
+    def record(name='app', msg='m', exc=None):
+        return logging.LogRecord(name, logging.ERROR, '', 1, msg, (), exc)
+
+    plain = MonologFormatter(channel='c')
+    # At, one under and one over every limit the cut and the ladder use, in every free-form field.
+    for limit in sorted({S // 4, S // 2, S, L // 6, L // 4, L}):
+        for size in (limit - 1, limit, limit + 1):
+            text = (char * size)[:size]
+            error = ValueError(text)
+            check(plain, record(msg=text))
+            check(plain, record(), value=text, key={text: 1})
+            check(plain, record(exc=(ValueError, error, None)))
+            check(MonologFormatter(channel=text), record(name=text, msg=text, exc=(ValueError, error, None)))
+
+    # A message sized so the whole line is a few bytes under, at, or over the cap.
+    width = len(json.dumps(char, ensure_ascii=False).encode(errors='backslashreplace')) - 2
+    base = len(plain.format(record(msg='')).encode()) + 1
+    for target in range(L - 3 * width, L + 3 * width + 1):
+        count = (target - base) // width
+        entry = check(plain, record(msg=char * count))
+        if base + count * width <= L:
+            assert entry['message'] == char * count, 'cut a line that fit'
+
+    # Enough large fields that every step of the fallback ladder runs.
+    for count in (15, 16, 17, 40):
+        big = char * 20_000
+        fields = {f'k{i}': char * (S + 1) for i in range(count)}
+        exc = (ValueError, ValueError(big), None)
+        check(MonologFormatter(channel=big), record(name=big, msg=big, exc=exc), **fields)
+
+
+def test_lone_surrogates_are_escaped_not_dropped():
+    with captured_stdout() as stdout:
+        handler = CloudHandler(None)
+        handler.address = None  # stdout, even if the tests run on Cloud
+        handler.setFormatter(MonologFormatter(channel='\udcff'))
+        record = logging.LogRecord('\udcfe', logging.ERROR, __file__, 1, 'file \udcfd', (), None)
+        record.path = '/tmp/\udcfc'
+        handler.handle(record)
+        sys.__stdout__.flush()
+        (entry,) = stdout()
+    assert entry['message'] == 'file \udcfd'
+    assert entry['channel'] == '\udcff'
+    assert entry['extra']['logger'] == '\udcfe'
+    assert entry['context']['path'] == '/tmp/\udcfc'
 
 
 def test_handler_failures_never_raise():
