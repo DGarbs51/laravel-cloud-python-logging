@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "laravel-cloud-logging"
-version = "0.1.1"
+version = "0.1.2"
 description = "Laravel-style (Monolog JSON) logging for Python apps on Laravel Cloud"
 readme = "README.md"
 license = "MIT"
