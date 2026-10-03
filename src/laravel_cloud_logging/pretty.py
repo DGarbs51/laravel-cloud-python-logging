@@ -17,9 +17,14 @@ import sys
 from collections.abc import Sequence
 from typing import cast
 
-from . import _ESCAPE, _LEVELS, _color, _render  # pyright: ignore[reportPrivateUsage]
+from . import _CONTROL, _ESCAPE, _LEVELS, _LINE, _color, _render  # pyright: ignore[reportPrivateUsage]
 
 _RANK = {name: number for _, number, name in _LEVELS}
+
+
+def _plain(raw: bytes) -> bytes:
+    """A line that is not a record, with control characters escaped so it can't drive the terminal."""
+    return raw.decode(errors='surrogateescape').translate(_CONTROL).encode(errors='surrogateescape')
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -48,7 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         name = record.get('level_name')
         if not isinstance(name, str):
             if not (level or request or (grep and grep not in line.decode(errors='replace').casefold())):
-                out.write(line + b'\n')
+                out.write(_plain(line) + b'\n')
             return
         context = record.get('context')
         context = cast('dict[str, object]', context) if isinstance(context, dict) else {}
@@ -86,8 +91,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         *lines, buf = (buf + chunk).split(b'\n')
         for line in lines:
             show(line)
+        if len(buf) >= _LINE:  # longer than any record: show it now, so memory stays bounded
+            show(buf)
+            buf = b''
         if buf and not buf.startswith(b'{') and not (level or request or grep):
-            out.write(buf)  # a prompt like (Pdb) shows before its newline
+            out.write(_plain(buf))  # a prompt like (Pdb) shows before its newline
             buf = b''
         out.flush()
     if buf:

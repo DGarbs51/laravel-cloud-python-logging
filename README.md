@@ -85,7 +85,7 @@ python -m laravel_cloud_logging.pretty --request 9f1c... < saved.log
 - `--request ID`: show only records with this `cloud_request_id`.
 - `--grep TEXT`: show only lines that contain this text. Case does not matter.
 
-After `--`, `pretty` runs the command, reads its stdout and stderr, and exits with the command's exit code. It forwards `SIGTERM` to the command. Lines that are not records, such as server boot lines and `print()` output, pass through unchanged. `--level` and `--request` hide them. Without filters, a prompt such as `(Pdb)` shows before its newline, so `breakpoint()` works. Without `--`, `pretty` reads stdin.
+After `--`, `pretty` runs the command, reads its stdout and stderr, and exits with the command's exit code. It forwards `SIGTERM` to the command. Lines that are not records, such as server boot lines and `print()` output, pass through with control characters escaped, so log text cannot drive your terminal. `--level` and `--request` hide them. Without filters, a prompt such as `(Pdb)` shows before its newline, so `breakpoint()` works. A line longer than 256 KiB shows in pieces. Without `--`, `pretty` reads stdin.
 
 ## What `configure()` does
 
@@ -104,6 +104,8 @@ The middleware reads the `Cloud-Request-ID` header. Every record logged during t
 With `wsgi_middleware` and the Django middleware, the ID stays set on the worker thread until the next request. Records logged on that thread between requests keep the last request's ID. `asgi_middleware` clears the ID when the request ends.
 
 Cloud sets this header and replaces any value a client sends. The package ignores `X-Request-ID`, because clients control it.
+
+Only trust the ID on Cloud. Off Cloud, nothing strips the header, so any client can set it. The middleware accepts up to 128 letters, digits, `.`, `_`, `:` and `-`. Other values leave the ID unset.
 
 ## Log levels
 

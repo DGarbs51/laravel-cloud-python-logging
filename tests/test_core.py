@@ -18,6 +18,7 @@ from helpers import KEYS, Broken, Collector, captured_stdout, fmt
 
 import laravel_cloud_logging as lcl
 from laravel_cloud_logging import CloudHandler, MonologFormatter, configure
+from laravel_cloud_logging._headers import header_id
 
 
 @pytest.fixture
@@ -622,6 +623,16 @@ def test_wsgi_middleware():
     wrapped({'HTTP_X_REQUEST_ID': 'client-set'}, None)  # X-Request-ID is client-controlled: ignored
     wrapped({'HTTP_CLOUD_REQUEST_ID': 'x' * 129}, None)
     assert seen == ['abc', None, None]
+
+
+@pytest.mark.parametrize('value', ['req-1', 'a' * 128, '9f1c.b2:c_d-E'])
+def test_header_id_accepts_ids(value):
+    assert header_id(value) == value
+
+
+@pytest.mark.parametrize('value', [None, b'abc', '', 'x' * 129, 'a b', 'a\nb', '\x1b[2J', 'a\x00', 'é', 'abc\n'])
+def test_header_id_rejects_unsafe_values(value):
+    assert header_id(value) is None
 
 
 def test_asgi_middleware():
