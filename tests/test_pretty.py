@@ -197,3 +197,14 @@ def test_pretty_main_module(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         runpy.run_module('laravel_cloud_logging.pretty', run_name='__main__')
     assert exc.value.code == 4
+
+
+def test_pretty_escapes_control_characters_in_plain_lines():
+    # A raw ESC in a non-record line (piped production logs, a prompt) can't reach the terminal.
+    assert run([], b'evil \x1b]0;title\x07\nprompt \x1b[2J')[1] == 'evil \\x1b]0;title\\x07\nprompt \\x1b[2J'
+
+
+def test_pretty_bounds_a_line_without_newline():
+    script = f"print('{{' + 'x' * {pretty._LINE + 10}, end='')"
+    out = run(['--grep', 'x', '--', sys.executable, '-c', script])[1]
+    assert out.count('\n') == 2  # cut at the cap and shown, then the rest at the end
