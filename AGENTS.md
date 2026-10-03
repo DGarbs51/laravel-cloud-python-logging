@@ -47,7 +47,7 @@ Nearly everything lives in `src/laravel_cloud_logging/__init__.py`:
 
 ## Releasing
 
-Bump `version` in `pyproject.toml`, `uv lock`, merge to `main`; then `gh workflow run publish.yml --ref main` (TestPyPI) and `gh release create v<version> --generate-notes` (PyPI, trusted publishing, requires approving the `pypi` environment).
+Bump `version` in `pyproject.toml`, `uv lock`, merge to `main`; then `gh workflow run publish.yml --ref main` (TestPyPI) and `gh release create v<version> --generate-notes` (PyPI, trusted publishing).
 
 <!-- caveman-begin -->
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
