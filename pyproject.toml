@@ -42,7 +42,7 @@ Issues = "https://github.com/DGarbs51/laravel-cloud-python-logging/issues"
 Releases = "https://github.com/DGarbs51/laravel-cloud-python-logging/releases"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "README.md", "LICENSE"]
+include = ["/src", "/README.md", "/LICENSE"]  # anchored: a bare "src" also matches nested dirs like node_modules/*/src
 
 [dependency-groups]
 test = [

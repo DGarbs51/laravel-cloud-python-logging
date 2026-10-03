@@ -1,10 +1,13 @@
+import array
 import asyncio
+import collections
 import json
 import logging
 import os
 import socket
 import sys
 import threading
+import tracemalloc
 import warnings
 from contextlib import closing
 from datetime import datetime, timezone
@@ -105,6 +108,202 @@ def test_normalization():
     many = fmt(many={i: i for i in range(1500)})['context']['many']
     assert len(many) == 1001
     assert many['...'].startswith('Over 1000 items')
+
+
+OVER = 'Over normalization budget, aborting normalization'
+
+
+def test_normalization_budget_bounds_work_and_keeps_platform_fields():
+    class Leaf:
+        calls = 0
+
+        def __str__(self):
+            Leaf.calls += 1
+            return 'leaf'
+
+    # Shared references fan out without a cycle: 1000**3 leaves, but the budget stops at 10,000 values.
+    fan = [[[Leaf()] * 1000] * 1000] * 1000
+    assert list(fmt(fan=fan)) == KEYS
+    assert Leaf.calls < 10_000
+    cycle = []
+    cycle.extend([cycle] * 1000)  # 1000**9 paths before the depth limit
+    assert list(fmt(cycle=cycle)) == KEYS
+
+    try:
+        raise ValueError('boom')
+    except ValueError:
+        exc_info = sys.exc_info()
+    token = lcl.cloud_request_id.set('req-7')
+    try:
+        rows = fmt(rows=[{f'f{j}': j for j in range(10)} for _ in range(1000)], exc_info=exc_info)['context']
+        wide = fmt(exc_info=exc_info, **{f's{i}': 'y' * 200_000 for i in range(6)})['context']
+    finally:
+        lcl.cloud_request_id.reset(token)
+    # Ordinary context is cut where the budget runs out; platform fields are never dropped.
+    assert rows['rows'][-1] == OVER
+    assert 900 < sum(isinstance(row, dict) for row in rows['rows']) < 1000
+    assert wide['s5'] == OVER
+    for context in (rows, wide):
+        assert context['cloud_request_id'] == 'req-7'
+        assert context['exception']['message'] == 'boom'
+
+    # Keys past the budget are never replaced by a shared marker that could overwrite a kept value.
+    kept = fmt(**{OVER: 'keep me'}, **{f's{i}': 'y' * 200_000 for i in range(8)})['context']
+    assert kept[OVER] == 'keep me'
+    assert kept['s5'] == kept['...'] == OVER
+    assert 's6' not in kept
+    # A user key '...' is never overwritten by a marker either.
+    dots = fmt(**{'...': 'keep me'}, **{f's{i}': 'y' * 200_000 for i in range(8)})['context']
+    assert dots['...'] == 'keep me'
+    assert dots['s5'] == OVER
+
+    shared = {'k': 1}
+    error = ValueError('shared')
+    reused = fmt(a=(), b=(), c=shared, d=shared, error=error, exc_info=(ValueError, error, None))['context']
+    assert reused['a'] == reused['b'] == []
+    assert reused['c'] == reused['d'] == {'k': 1}
+    assert reused['error'] == reused['exception']
+
+
+@pytest.mark.parametrize('container', [list, tuple, set, frozenset])
+def test_normalization_only_reads_the_item_limit(container):
+    class Bounded(container):
+        def __iter__(self):
+            for i, value in enumerate(super().__iter__()):
+                assert i < 1000, 'normalizer read beyond the item limit'
+                yield value
+
+    result = fmt(value=Bounded(range(1500)))['context']['value']
+    assert len(result) == 1001
+    assert result[-1] == 'Over 1000 items (1500 total), aborting normalization'
+
+
+def test_huge_scalars_are_sliced_before_conversion():
+    class Sliced(str):
+        def encode(self, *args, **kwargs):
+            assert len(self) <= 256 * 1024, 'encoded the whole oversized string'
+            return super().encode(*args, **kwargs)
+
+    text = lcl._cut(Sliced('😀' * 300_000))
+    assert text.endswith(' [truncated]')
+    assert len(text.encode()) <= 16384 + 12
+    # Over the character budget it would become a marker; sliced first, it is kept and cut.
+    assert fmt(value='x' * 2_000_000)['context']['value'].endswith(' [truncated]')
+
+    def peak(make_record, formatter=None):
+        record = make_record()  # inputs are built before measuring
+        tracemalloc.start()
+        try:
+            line = (formatter or MonologFormatter()).format(record)
+            return json.loads(line), tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    huge = b'\x00' * 12_500_000
+    error = ValueError('e' * 12_500_000)
+    extras = [f'k{i}' for i in range(1_000_000)]
+    cases = [
+        (lambda: record_with(payload=huge), None),
+        (lambda: record_with(payload=bytearray(huge)), None),
+        (lambda: record_with(data={huge: 1}), None),
+        (lambda: record_with(exc_info=(ValueError, error, None)), None),
+        (lambda: logging.LogRecord('n' * 12_500_000, logging.ERROR, '', 1, 'm', (), None), None),
+        (lambda: logging.LogRecord('app', logging.ERROR, '', 1, 'x' * 12_500_000, (), None), None),
+        (lambda: record_with(), MonologFormatter(channel='c' * 12_500_000)),
+        (lambda: record_with(errors=[ValueError('x' * 300_000)] * 1000), None),  # exception messages use the budget
+        (lambda: record_with(**dict.fromkeys(extras, 0)), None),  # only the first 1,001 extras are copied
+    ]
+    for make_record, formatter in cases:
+        entry, used = peak(make_record, formatter)
+        assert list(entry) == KEYS
+        assert used < 8 * 2**20, f'{used / 2**20:.1f} MiB'
+
+    # A memoryview keeps its opaque repr, so its contents are never copied or logged.
+    view = memoryview(huge).cast('B', shape=[1, len(huge)])
+    entry, used = peak(lambda: record_with(payload=view))
+    assert entry['context']['payload'].startswith('<memory at ')
+    assert used < 2**20
+
+
+def record_with(**extra):
+    record = logging.LogRecord('app', logging.ERROR, '', 1, 'm', (), extra.pop('exc_info', None))
+    record.__dict__.update(extra)
+    return record
+
+
+def test_platform_fields_win_over_broken_extras():
+    error = ValueError('real error')
+    entry = fmt(exception={10**5000: 1}, exc_info=(ValueError, error, None))
+    assert entry['message'] == 'hello world'
+    assert entry['context']['exception']['message'] == 'real error'
+    # Without exc_info the user's value is kept; an unprintable key degrades instead of failing the record.
+    assert fmt(exception={10**5000: 1})['context']['exception'] == {'[unprintable int]': 1}
+
+
+def test_exception_message_from_huge_arguments_is_bounded():
+    blob = b'\x00' * 12_500_000
+    fan = [[[0] * 1000] * 1000] * 1000  # str() of this exception would be about 3 GB
+    huge = (
+        fan,
+        blob,
+        bytearray(blob),
+        [blob],
+        array.array('B', blob),
+        collections.deque([0] * 1_000_000),
+        set(range(1_000_000)),
+        {i: i for i in range(1_000_000)},
+        [[['x' * 16384] * 30] * 30] * 30,  # each value is small, the total is not
+    )
+    for arg in huge:
+        for error in (ValueError(arg), KeyError(arg)):
+            tracemalloc.start()
+            try:
+                message = fmt(exc_info=(type(error), error, None))['context']['exception']['message']
+                used = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+            assert len(message) <= 256 * 1024
+            assert used < 8 * 2**20, f'{type(arg).__name__}: {used / 2**20:.1f} MiB'
+    # Small arguments read exactly like str(), in their own order.
+    small = (
+        ValueError(),
+        ValueError('a', 'b'),
+        ValueError([1, 2]),
+        ValueError({'b': 1, 'a': 2}),
+        ValueError({3, 1}),
+        ValueError(frozenset()),
+        ValueError(b'abc'),
+        ValueError(collections.deque([1])),
+        KeyError('x'),
+        OSError(2, 'missing'),
+    )
+    for error in small:
+        assert fmt(exc_info=(type(error), error, None))['context']['exception']['message'] == str(error)
+    deep = ValueError([[[{1: 2}, {3}]]])  # past 3 levels, containers become markers
+    assert fmt(exc_info=(ValueError, deep, None))['context']['exception']['message'] == '[[[{...}, {...}]]]'
+    unprintable = ValueError({'k': 10**5000})
+    message = fmt(exc_info=(ValueError, unprintable, None))['context']['exception']['message']
+    assert 'digits' in message if sys.version_info >= (3, 13) else message == '[unprintable ValueError]'
+
+
+def test_deep_cause_chain_and_float_subclass():
+    error = None
+    for i in range(9):
+        try:
+            raise ValueError(str(i)) from error
+        except ValueError as raised:
+            error = raised
+    exc = fmt(exc_info=(ValueError, error, error.__traceback__))['context']['exception']
+    while 'previous' in exc:
+        assert exc['trace'], exc['message']
+        exc = exc['previous']
+    assert exc['trace']
+
+    class Loud(float):
+        def __str__(self):
+            return 'B' * 1_000_000
+
+    assert fmt(n=Loud('nan'))['context']['n'] == 'nan'
 
 
 def test_stack_info():
@@ -494,6 +693,74 @@ def test_handler_lines_never_exceed_256_kib():
     assert len(entries) == 3
     assert all(list(e) == KEYS and e['level_name'] == 'ERROR' for e in entries)
     assert all(len(line) + 1 <= 256 * 1024 for line in raw.split(b'\n') if line)
+
+    # Every byte of the three free-form fields becomes a six-byte \u0000 escape.
+    nul = '\x00' * 20_000
+    line = MonologFormatter(channel=nul).format(logging.LogRecord(nul, logging.ERROR, '', 1, nul, (), None))
+    assert len(line.encode()) + 1 <= 256 * 1024
+    assert json.loads(line)['level_name'] == 'ERROR'
+
+
+@pytest.mark.parametrize('char', ['a', 'é', '雪', '😀', '\x00', '"', '\\', 'a😀\x00', '\ud800'])
+def test_exact_size_boundaries_never_exceed_the_cap(char):
+    S, L = lcl._STRING, lcl._LINE
+
+    def check(formatter, record, **extra):
+        record.__dict__.update(extra)
+        line = formatter.format(record)
+        assert len(line.encode(errors='backslashreplace')) + 1 <= L
+        entry = json.loads(line)
+        assert list(entry) == KEYS
+        assert entry['level_name'] == 'ERROR'
+        for text in (entry['message'], entry['channel'], entry['extra']['logger']):
+            assert '\ufffd' not in text  # never cut mid-character
+        return entry
+
+    def record(name='app', msg='m', exc=None):
+        return logging.LogRecord(name, logging.ERROR, '', 1, msg, (), exc)
+
+    plain = MonologFormatter(channel='c')
+    # At, one under and one over every limit the cut and the ladder use, in every free-form field.
+    for limit in sorted({S // 4, S // 2, S, L // 6, L // 4, L}):
+        for size in (limit - 1, limit, limit + 1):
+            text = (char * size)[:size]
+            error = ValueError(text)
+            check(plain, record(msg=text))
+            check(plain, record(), value=text, key={text: 1})
+            check(plain, record(exc=(ValueError, error, None)))
+            check(MonologFormatter(channel=text), record(name=text, msg=text, exc=(ValueError, error, None)))
+
+    # A message sized so the whole line is a few bytes under, at, or over the cap.
+    width = len(json.dumps(char, ensure_ascii=False).encode(errors='backslashreplace')) - 2
+    base = len(plain.format(record(msg='')).encode()) + 1
+    for target in range(L - 3 * width, L + 3 * width + 1):
+        count = (target - base) // width
+        entry = check(plain, record(msg=char * count))
+        if base + count * width <= L:
+            assert entry['message'] == char * count, 'cut a line that fit'
+
+    # Enough large fields that every step of the fallback ladder runs.
+    for count in (15, 16, 17, 40):
+        big = char * 20_000
+        fields = {f'k{i}': char * (S + 1) for i in range(count)}
+        exc = (ValueError, ValueError(big), None)
+        check(MonologFormatter(channel=big), record(name=big, msg=big, exc=exc), **fields)
+
+
+def test_lone_surrogates_are_escaped_not_dropped():
+    with captured_stdout() as stdout:
+        handler = CloudHandler(None)
+        handler.address = None  # stdout, even if the tests run on Cloud
+        handler.setFormatter(MonologFormatter(channel='\udcff'))
+        record = logging.LogRecord('\udcfe', logging.ERROR, __file__, 1, 'file \udcfd', (), None)
+        record.path = '/tmp/\udcfc'
+        handler.handle(record)
+        sys.__stdout__.flush()
+        (entry,) = stdout()
+    assert entry['message'] == 'file \udcfd'
+    assert entry['channel'] == '\udcff'
+    assert entry['extra']['logger'] == '\udcfe'
+    assert entry['context']['path'] == '/tmp/\udcfc'
 
 
 def test_handler_failures_never_raise():
