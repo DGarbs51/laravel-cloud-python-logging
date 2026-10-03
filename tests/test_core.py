@@ -107,6 +107,77 @@ def test_normalization():
     assert many['...'].startswith('Over 1000 items')
 
 
+OVER = 'Over normalization budget, aborting normalization'
+
+
+def test_normalization_budget_bounds_work_and_keeps_platform_fields():
+    class Leaf:
+        calls = 0
+
+        def __str__(self):
+            Leaf.calls += 1
+            return 'leaf'
+
+    # Shared references fan out without a cycle: 1000**3 leaves, but the budget stops at 10,000 values.
+    fan = [[[Leaf()] * 1000] * 1000] * 1000
+    assert list(fmt(fan=fan)) == KEYS
+    assert Leaf.calls < 10_000
+    cycle = []
+    cycle.extend([cycle] * 1000)  # 1000**9 paths before the depth limit
+    assert list(fmt(cycle=cycle)) == KEYS
+
+    try:
+        raise ValueError('boom')
+    except ValueError:
+        exc_info = sys.exc_info()
+    token = lcl.cloud_request_id.set('req-7')
+    try:
+        rows = fmt(rows=[{f'f{j}': j for j in range(10)} for _ in range(1000)], exc_info=exc_info)['context']
+        wide = fmt(exc_info=exc_info, **{f's{i}': 'y' * 200_000 for i in range(6)})['context']
+    finally:
+        lcl.cloud_request_id.reset(token)
+    # Ordinary context is cut where the budget runs out; platform fields are never dropped.
+    assert rows['rows'][-1] == OVER
+    assert 900 < sum(isinstance(row, dict) for row in rows['rows']) < 1000
+    assert OVER in wide
+    for context in (rows, wide):
+        assert context['cloud_request_id'] == 'req-7'
+        assert context['exception']['message'] == 'boom'
+
+    shared = {'k': 1}
+    error = ValueError('shared')
+    reused = fmt(a=(), b=(), c=shared, d=shared, error=error, exc_info=(ValueError, error, None))['context']
+    assert reused['a'] == reused['b'] == []
+    assert reused['c'] == reused['d'] == {'k': 1}
+    assert reused['error'] == reused['exception']
+
+
+@pytest.mark.parametrize('container', [list, tuple, set, frozenset])
+def test_normalization_only_reads_the_item_limit(container):
+    class Bounded(container):
+        def __iter__(self):
+            for i, value in enumerate(super().__iter__()):
+                assert i < 1000, 'normalizer read beyond the item limit'
+                yield value
+
+    result = fmt(value=Bounded(range(1500)))['context']['value']
+    assert len(result) == 1001
+    assert result[-1] == 'Over 1000 items (1500 total), aborting normalization'
+
+
+def test_huge_scalars_are_sliced_before_conversion():
+    class Sliced(str):
+        def encode(self, *args, **kwargs):
+            assert len(self) <= 256 * 1024, 'encoded the whole oversized string'
+            return super().encode(*args, **kwargs)
+
+    text = fmt(value=Sliced('😀' * 300_000))['context']['value']
+    assert text.endswith(' [truncated]')
+    assert len(text.encode()) <= 16384 + 12
+    for payload in (b'\x00' * 1_000_000, bytearray(1_000_000), memoryview(bytes(1_000_000))):
+        assert fmt(payload=payload)['context']['payload'].endswith(' [truncated]')
+
+
 def test_stack_info():
     assert fmt(stack_info='Stack (most recent call last):\n  ...')['context']['stack'].startswith('Stack')
 

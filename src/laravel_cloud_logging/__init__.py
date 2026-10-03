@@ -26,8 +26,9 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Iterable, MutableMapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, MutableMapping
 from datetime import datetime, timezone
+from itertools import islice
 from types import TracebackType
 from typing import TYPE_CHECKING, TypedDict, TypeVar, cast, overload
 
@@ -73,6 +74,8 @@ _ACCESS = ('uvicorn.access', 'gunicorn.access', 'hypercorn.access', 'granian.acc
 # Same limits as Monolog's normalizer, plus a size cap well under the platform's
 # 1 MB truncation, which would turn the record into plain text at info level.
 _DEPTH, _ITEMS, _STRING, _TRACE, _LINE = 9, 1000, 16384, 100, 256 * 1024
+_NODES, _CHARS = 10000, 4 * _LINE  # per-record normalization budget
+_OVER = 'Over normalization budget, aborting normalization'
 _RETRY = 5  # seconds on stdout before trying the socket again
 _dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(',', ':'))
 
@@ -107,37 +110,55 @@ class _Record(TypedDict):
 cloud_request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar('cloud_request_id', default=None)
 
 
-def _clean(value: object, depth: int = 1) -> _Json:
-    """Return a JSON-safe copy, like Monolog: depth and item limits, str() fallback."""
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else str(value)
-    if depth > _DEPTH:
-        return f'Over {_DEPTH} levels deep, aborting normalization'
-    if isinstance(value, dict):
-        return _clean_dict(cast('dict[object, object]', value), depth)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        items = list(cast('Iterable[object]', value))
-        out: list[_Json] = [_clean(v, depth + 1) for v in items[:_ITEMS]]
-        if len(items) > _ITEMS:
-            out.append(_over_items(len(items)))
+class _Normalizer:
+    """Monolog's depth/item limits plus a per-record budget, so shared references can't fan out."""
+
+    def __init__(self) -> None:
+        self.nodes, self.chars = _NODES, _CHARS
+
+    def text(self, value: str) -> str:
+        if len(value) > _LINE:
+            value = value[:_LINE]
+        self.chars -= len(value)
+        return value if self.chars >= 0 else _OVER
+
+    def clean(self, value: object, depth: int = 1) -> _Json:
+        self.nodes -= 1
+        if self.nodes < 0 or self.chars < 0:
+            return _OVER  # open containers finish with markers; nothing new is walked
+        if isinstance(value, str):
+            return self.text(value)
+        if value is None or isinstance(value, (bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else str(float(value))
+        if depth > _DEPTH:
+            return f'Over {_DEPTH} levels deep, aborting normalization'
+        if isinstance(value, dict):
+            return self.clean_dict(cast('dict[object, object]', value), depth)
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = cast('Collection[object]', value)
+            out: list[_Json] = [self.clean(v, depth + 1) for v in islice(items, _ITEMS)]
+            if len(items) > _ITEMS:
+                out.append(_over_items(len(items)))
+            return out
+        if isinstance(value, BaseException):
+            self.nodes -= _TRACE  # a trace can be _TRACE frames
+            return _exception(value, depth)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            value = bytes(cast('bytes', value)[:_LINE])  # repr() of a huge buffer would be up to 4x its size
+        return self.text(_str(value))
+
+    def clean_dict(self, value: dict[object, object], depth: int) -> dict[str, _Json]:
+        out: dict[str, _Json] = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i == _ITEMS:
+                out['...'] = _over_items(len(value))
+                break
+            out[self.text(str(k))] = self.clean(v, depth + 1)
         return out
-    if isinstance(value, BaseException):
-        return _exception(value, depth)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return _str(value)
-
-
-def _clean_dict(value: dict[object, object], depth: int) -> dict[str, _Json]:
-    out: dict[str, _Json] = {}
-    for i, (k, v) in enumerate(value.items()):
-        if i == _ITEMS:
-            out['...'] = _over_items(len(value))
-            break
-        out[str(k)] = _clean(v, depth + 1)
-    return out
 
 
 def _over_items(total: int) -> str:
@@ -162,8 +183,8 @@ def _cut(value: object) -> object:
     """Cut a string to _STRING UTF-8 bytes (never mid-character), marking it when cut."""
     if not isinstance(value, str) or len(value) <= _STRING // 4:
         return value
-    raw = value.encode()
-    if len(raw) <= _STRING:
+    raw = value[:_STRING].encode()  # never encode more than the cut keeps
+    if len(raw) <= _STRING and len(value) <= _STRING:
         return value
     return raw[:_STRING].decode(errors='ignore') + ' [truncated]'
 
@@ -201,7 +222,7 @@ class MonologFormatter(logging.Formatter):
     def _base(self, record: logging.LogRecord, message: str, context: dict[str, _Json]) -> _Record:
         number, name = next(((n, s) for py, n, s in _LEVELS if record.levelno >= py), _LEVELS[-1][1:])
         return {
-            'message': message,
+            'message': message[:_LINE],
             'context': context,
             'level': number,
             'level_name': name,
@@ -214,14 +235,16 @@ class MonologFormatter(logging.Formatter):
         # User extra= fields stay inside context, so they can never collide with
         # the top-level keys the platform classifies on (source, logger, context, _cloud_event).
         context: dict[object, object] = {k: v for k, v in record.__dict__.items() if k not in _STANDARD}
-        request_id = cloud_request_id.get()
-        if request_id:
-            context['cloud_request_id'] = request_id  # the platform's ID wins over a user extra
+        # Platform fields come first so neither the item limit nor the budget can drop them.
+        keep: dict[str, _Json] = {}
+        if request_id := cloud_request_id.get():
+            keep['cloud_request_id'] = request_id[:_STRING]  # the platform's ID wins over a user extra
         if record.exc_info and record.exc_info[1] is not None:
-            context['exception'] = record.exc_info[1]
+            keep['exception'] = _exception(record.exc_info[1], 2)
         if record.stack_info:
-            context['stack'] = record.stack_info
-        return self._base(record, record.getMessage(), _clean_dict(context, 1))
+            keep['stack'] = record.stack_info[:_LINE]
+        extra = _Normalizer().clean_dict(context, 1)
+        return self._base(record, record.getMessage(), {**extra, **keep})
 
     def _encode(self, data: _Record) -> str:
         line = _dumps(data)
