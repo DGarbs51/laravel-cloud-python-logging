@@ -107,6 +107,7 @@ Each record is one JSON line with the keys `message`, `context`, `level`, `level
 
 - **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole. If the socket fails, or you are not on Cloud, lines go to stdout.
 - **Size cap:** Each line is at most 256 KiB. Long messages and traces are cut first, then extra context. Cloud turns records over 1 MB into plain text, so this cap keeps large records structured.
+- **Normalization:** Strings and keys over 256 Ki characters are cut to 16 KiB before encoding. Containers keep the existing depth (9) and item (1,000) limits; repeated container references become `[repeated reference]`. Each context has a total budget of 10,000 values and 1 MiB of string/key bytes. Exhausting either budget drops context with a truncation note. JSON encoding stops at the line cap.
 - **Channel:** `APP_ENV`, then `LARAVEL_CLOUD_ENV_NAME`, then `local`.
 
 ## Development

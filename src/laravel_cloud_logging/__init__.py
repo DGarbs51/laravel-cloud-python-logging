@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import functools
 import io
 import json
 import logging
@@ -28,6 +27,7 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 from datetime import datetime, timezone
+from itertools import islice
 from types import TracebackType
 from typing import TYPE_CHECKING, TypedDict, TypeVar, cast, overload
 
@@ -74,7 +74,8 @@ _ACCESS = ('uvicorn.access', 'gunicorn.access', 'hypercorn.access', 'granian.acc
 # 1 MB truncation, which would turn the record into plain text at info level.
 _DEPTH, _ITEMS, _STRING, _TRACE, _LINE = 9, 1000, 16384, 100, 256 * 1024
 _RETRY = 5  # seconds on stdout before trying the socket again
-_dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(',', ':'))
+_encoder = json.JSONEncoder(ensure_ascii=False, separators=(',', ':'))
+_NODES, _BYTES = 10000, 4 * _LINE
 
 __all__ = [
     'ALERT',
@@ -107,37 +108,64 @@ class _Record(TypedDict):
 cloud_request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar('cloud_request_id', default=None)
 
 
-def _clean(value: object, depth: int = 1) -> _Json:
-    """Return a JSON-safe copy, like Monolog: depth and item limits, str() fallback."""
-    if value is None or isinstance(value, (bool, int, str)):
+class _NormalizationLimit(Exception):
+    pass
+
+
+class _Normalizer:
+    def __init__(self) -> None:
+        self.nodes = _NODES
+        self.bytes = _BYTES
+        # Retain objects so temporary exception dictionaries cannot reuse an identity.
+        self.seen: dict[int, object] = {}
+
+    def text(self, value: str) -> str:
+        value = _bound(value)
+        self.bytes -= len(value.encode())
+        if self.bytes < 0:
+            raise _NormalizationLimit
         return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else str(value)
-    if depth > _DEPTH:
-        return f'Over {_DEPTH} levels deep, aborting normalization'
-    if isinstance(value, dict):
-        return _clean_dict(cast('dict[object, object]', value), depth)
-    if isinstance(value, (list, tuple, set, frozenset)):
-        items = list(cast('Iterable[object]', value))
-        out: list[_Json] = [_clean(v, depth + 1) for v in items[:_ITEMS]]
-        if len(items) > _ITEMS:
-            out.append(_over_items(len(items)))
+
+    def clean(self, value: object, depth: int = 1) -> _Json:
+        """Bound total work as well as each container; never expand an identity twice."""
+        self.nodes -= 1
+        if self.nodes < 0:
+            raise _NormalizationLimit
+        if isinstance(value, str):
+            return self.text(value)
+        if value is None or isinstance(value, (bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else str(value)
+        if depth > _DEPTH:
+            return f'Over {_DEPTH} levels deep, aborting normalization'
+        identity = id(value)
+        if isinstance(value, (dict, list, tuple, set, frozenset, BaseException)):
+            if identity in self.seen:
+                return '[repeated reference]'
+            self.seen[identity] = value
+        if isinstance(value, dict):
+            return self.clean_dict(cast('dict[object, object]', value), depth)
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = cast('list[object] | tuple[object, ...] | set[object] | frozenset[object]', value)
+            out = [self.clean(v, depth + 1) for v in islice(items, _ITEMS)]
+            if len(items) > _ITEMS:
+                out.append(_over_items(len(items)))
+            return out
+        if isinstance(value, BaseException):
+            return self.clean(_exception(value, depth), depth)
+        if isinstance(value, datetime):
+            return self.text(value.isoformat())
+        return self.text(_str(value))
+
+    def clean_dict(self, value: dict[object, object], depth: int) -> dict[str, _Json]:
+        out: dict[str, _Json] = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i == _ITEMS:
+                out['...'] = _over_items(len(value))
+                break
+            out[self.text(str(k))] = self.clean(v, depth + 1)
         return out
-    if isinstance(value, BaseException):
-        return _exception(value, depth)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return _str(value)
-
-
-def _clean_dict(value: dict[object, object], depth: int) -> dict[str, _Json]:
-    out: dict[str, _Json] = {}
-    for i, (k, v) in enumerate(value.items()):
-        if i == _ITEMS:
-            out['...'] = _over_items(len(value))
-            break
-        out[str(k)] = _clean(v, depth + 1)
-    return out
 
 
 def _over_items(total: int) -> str:
@@ -155,17 +183,22 @@ _T = TypeVar('_T')
 
 
 @overload
-def _cut(value: str) -> str: ...
+def _cut(value: str, limit: int = _STRING) -> str: ...
 @overload
-def _cut(value: _T) -> _T: ...
-def _cut(value: object) -> object:
-    """Cut a string to _STRING UTF-8 bytes (never mid-character), marking it when cut."""
-    if not isinstance(value, str) or len(value) <= _STRING // 4:
+def _cut(value: _T, limit: int = _STRING) -> _T: ...
+def _cut(value: object, limit: int = _STRING) -> object:
+    """Cut a string to limit UTF-8 bytes (never mid-character), marking it when cut."""
+    if not isinstance(value, str) or len(value) <= limit // 4:
         return value
-    raw = value.encode()
-    if len(raw) <= _STRING:
+    raw = value[:limit].encode()
+    if len(raw) <= limit and len(value) <= limit:
         return value
-    return raw[:_STRING].decode(errors='ignore') + ' [truncated]'
+    return raw[:limit].decode(errors='ignore') + ' [truncated]'
+
+
+def _bound(value: str) -> str:
+    # A scalar is one iterencode chunk: bound it before JSON escaping allocates that chunk.
+    return _cut(value) if len(value) > _LINE else value
 
 
 def _exception(exc: BaseException, depth: int = 1, seen: set[int] | None = None) -> dict[str, _Json]:
@@ -201,19 +234,21 @@ class MonologFormatter(logging.Formatter):
     def _base(self, record: logging.LogRecord, message: str, context: dict[str, _Json]) -> _Record:
         number, name = next(((n, s) for py, n, s in _LEVELS if record.levelno >= py), _LEVELS[-1][1:])
         return {
-            'message': message,
+            'message': _bound(message),
             'context': context,
             'level': number,
             'level_name': name,
-            'channel': self.channel,
+            'channel': _bound(self.channel),
             'datetime': datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec='microseconds'),
-            'extra': {'logger': record.name},
+            'extra': {'logger': _bound(record.name)},
         }
 
     def _record(self, record: logging.LogRecord) -> _Record:
         # User extra= fields stay inside context, so they can never collide with
         # the top-level keys the platform classifies on (source, logger, context, _cloud_event).
-        context: dict[object, object] = {k: v for k, v in record.__dict__.items() if k not in _STANDARD}
+        context: dict[object, object] = dict(
+            islice(((k, v) for k, v in record.__dict__.items() if k not in _STANDARD), _ITEMS + 1)
+        )
         request_id = cloud_request_id.get()
         if request_id:
             context['cloud_request_id'] = request_id  # the platform's ID wins over a user extra
@@ -221,11 +256,15 @@ class MonologFormatter(logging.Formatter):
             context['exception'] = record.exc_info[1]
         if record.stack_info:
             context['stack'] = record.stack_info
-        return self._base(record, record.getMessage(), _clean_dict(context, 1))
+        try:
+            normalized: dict[str, _Json] = _Normalizer().clean_dict(context, 1)
+        except _NormalizationLimit:
+            normalized = {'truncated': 'context dropped: normalization budget exceeded'}
+        return self._base(record, record.getMessage(), normalized)
 
     def _encode(self, data: _Record) -> str:
         line = _dumps(data)
-        if _fits(line):
+        if line:
             return line
         data['message'] = _cut(data['message'])
         data['context'] = {k: _cut(v) for k, v in data['context'].items()}
@@ -235,7 +274,7 @@ class MonologFormatter(logging.Formatter):
             exc['trace'] = trace[:20]
             exc.pop('previous', None)
         line = _dumps(data)
-        if _fits(line):
+        if line:
             return line
         note = f'context dropped: record exceeded {_LINE // 1024} KiB'
         keep: dict[str, _Json] = {
@@ -243,18 +282,27 @@ class MonologFormatter(logging.Formatter):
         }
         data['context'] = {**keep, 'truncated': note}
         line = _dumps(data)
-        if _fits(line):
+        if line:
             return line
         # Last resort: cut every remaining free-form field, so the seven keys and the level survive.
         data['context'] = {'truncated': note}
-        data['channel'] = _cut(data['channel'])
-        data['extra'] = {'logger': _cut(data['extra']['logger'])}
+        # Three strings must fit even when every character becomes a six-byte JSON escape.
+        data['message'] = _cut(data['message'], _STRING // 2)
+        data['channel'] = _cut(data['channel'], _STRING // 2)
+        data['extra'] = {'logger': _cut(data['extra']['logger'], _STRING // 2)}
         return _dumps(data)
 
 
-def _fits(line: str) -> bool:
-    # The budget includes the newline the handler adds.
-    return len(line.encode()) < _LINE
+def _dumps(data: _Record) -> str:
+    """Stop before accumulating an oversized JSON line; scalar strings are already capped."""
+    chunks: list[str] = []
+    size = 1  # Include the newline the handler adds.
+    for chunk in _encoder.iterencode(data):
+        size += len(chunk.encode())
+        if size > _LINE:
+            return ''
+        chunks.append(chunk)
+    return ''.join(chunks)
 
 
 class CloudHandler(logging.Handler):

@@ -107,6 +107,111 @@ def test_normalization():
     assert many['...'].startswith('Over 1000 items')
 
 
+@pytest.mark.parametrize('container', [list, tuple, set, frozenset, dict])
+def test_shared_containers_are_expanded_once_per_record(container):
+    class Leaf:
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return 'leaf'
+
+    leaf = Leaf()
+    shared = {'key': leaf} if container is dict else container([leaf])
+    graph = shared
+    for _ in range(6):
+        graph = [graph] * 4
+    formatter = MonologFormatter()
+    record = logging.LogRecord('app', logging.INFO, __file__, 1, 'shared graph', (), None)
+    record.__dict__.update(graph=graph, again=shared)
+    entry = json.loads(formatter.format(record))
+    assert leaf.calls == 1
+    assert entry['context']['again'] == '[repeated reference]'
+    assert entry['context']['graph'][1:] == ['[repeated reference]'] * 3
+    # State belongs to this format call, never to the formatter or the input graph.
+    assert json.loads(formatter.format(record))['context']['graph'][0] != '[repeated reference]'
+    assert leaf.calls == 2
+    assert len(shared) == 1
+
+
+def test_cyclic_containers_are_marked():
+    items = []
+    mapping = {'items': items}
+    items.extend([items, mapping])
+    assert fmt(value=items)['context']['value'] == ['[repeated reference]', {'items': '[repeated reference]'}]
+
+
+@pytest.mark.parametrize('container', [list, tuple, set, frozenset])
+def test_normalization_only_reads_the_container_item_limit(container):
+    class Bounded(container):
+        def __iter__(self):
+            for i, value in enumerate(super().__iter__()):
+                assert i < 1000, 'normalizer read beyond the item limit'
+                yield value
+
+    result = fmt(value=Bounded(range(1500)))['context']['value']
+    assert len(result) == 1001
+    assert result[-1] == 'Over 1000 items (1500 total), aborting normalization'
+
+
+@pytest.mark.parametrize('text', ['leaf', '雪' * 5000])
+def test_normalization_has_a_total_work_and_string_budget(text):
+    class Leaf:
+        calls = 0
+
+        def __str__(self):
+            self.calls += 1
+            return text
+
+    leaf = Leaf()
+    # Distinct containers defeat identity tracking alone; repeated scalars consume bytes too.
+    graph = [[leaf] * 1000 for _ in range(12)]
+    entry = fmt(level=logging.ERROR, graph=graph)
+    assert 0 < leaf.calls < (100 if len(text) > 4 else 10000)
+    assert entry['message'] == 'hello world'
+    assert entry['level_name'] == 'ERROR'
+    assert entry['context'] == {'truncated': 'context dropped: normalization budget exceeded'}
+
+
+def test_large_scalars_and_escaped_fields_are_bounded():
+    # _cut must slice before encoding, including keys and nested values.
+    class BoundedString(str):
+        def encode(self, *args, **kwargs):
+            assert len(self) <= 256 * 1024, 'encoded the entire oversized input'
+            return super().encode(*args, **kwargs)
+
+    huge = BoundedString('😀' * 300_000)
+    result = fmt(value={huge: [huge]})['context']['value']
+    (key,) = result
+    assert key.endswith(' [truncated]')
+    assert result[key] == [key]
+    assert len(key.encode()) <= 16384 + 12
+
+    record = logging.LogRecord('\x00' * 20000, logging.ERROR, '', 1, '\x00' * 20000, (), None)
+    line = MonologFormatter(channel='\x00' * 20000).format(record)
+    assert len(line.encode()) + 1 <= 256 * 1024
+    assert list(json.loads(line)) == KEYS
+    assert json.loads(line)['level_name'] == 'ERROR'
+
+
+def test_json_serialization_stops_at_line_budget():
+    original = lcl._encoder.iterencode
+    runs = []
+
+    def chunks(data):
+        run = []
+        runs.append(run)
+        for chunk in original(data):
+            run.append(len(chunk.encode()))
+            yield chunk
+
+    with patch.object(lcl._encoder, 'iterencode', chunks):
+        entry = fmt(values=['x' * 1000] * 900)
+    assert 'truncated' in entry['context']
+    assert len(runs) > 1
+    assert all(sum(run) <= 256 * 1024 + 1002 for run in runs)
+
+
 def test_stack_info():
     assert fmt(stack_info='Stack (most recent call last):\n  ...')['context']['stack'].startswith('Stack')
 
