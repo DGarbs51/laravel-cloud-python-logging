@@ -54,7 +54,7 @@ Your server may need one more step:
 configure(level=None, *, exceptions=True, access_logs=False)
 ```
 
-- `level`: a name (`"debug"`, `"notice"`) or a number. Default: the `LOG_LEVEL` environment variable, then `INFO`.
+- `level`: a name (`"debug"`, `"notice"`) or a number. Default: the `LOG_LEVEL` environment variable, then `INFO`. An unknown name also falls back to `INFO`.
 - `exceptions=False`: do not log uncaught exceptions.
 - `access_logs=True`: keep your server's access logs. They are off by default, because Cloud already logs every request.
 
@@ -66,11 +66,13 @@ configure(level=None, *, exceptions=True, access_logs=False)
 - Turns off server access logs. Cloud's nginx already logs each request.
 - Returns a `logging.config.dictConfig` dict for servers that accept one.
 
-It is safe to call more than once. Logging never raises an error into your app.
+It is safe to call more than once. The formatter and handler never raise an error into your app. Python's `logging` itself still checks your arguments: see [Limits](#limits).
 
 ## Request IDs
 
 The middleware reads the `Cloud-Request-ID` header. Every record logged during that request gets `context.cloud_request_id`, so you can find all the logs for one request. The ID is also available as the `laravel_cloud_logging.cloud_request_id` context variable.
+
+With `wsgi_middleware` and the Django middleware, the ID stays set on the worker thread until the next request. Records logged on that thread between requests keep the last request's ID. `asgi_middleware` clears the ID when the request ends.
 
 Cloud sets this header and replaces any value a client sends. The package ignores `X-Request-ID`, because clients control it.
 
@@ -99,6 +101,7 @@ Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exc
 
 - Output from before `configure()` runs is plain text. This includes server boot lines and interpreter crashes. uWSGI's own boot lines are always plain text.
 - There is no redaction. Keep secrets out of messages and `extra=` fields.
+- Python's `logging` raises `KeyError` for `extra=` keys that are `LogRecord` attributes, such as `name`, `message` or `module`. Nest them instead: `extra={'order': {'name': name}}`.
 - Laravel's Exceptions feature is not supported yet.
 
 ## How it works
