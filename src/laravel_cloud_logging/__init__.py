@@ -21,6 +21,7 @@ import logging
 import logging.config
 import math
 import os
+import reprlib
 import socket
 import sys
 import threading
@@ -196,6 +197,24 @@ def _cut(value: object, limit: int = _STRING) -> object:
     return raw[:limit].decode(errors='ignore') + ' [truncated]'
 
 
+_repr = reprlib.Repr()  # bounded repr: 30 items per container, 3 levels, strings cut at _STRING
+_repr.maxlevel = 3
+_repr.maxdict = _repr.maxlist = _repr.maxtuple = _repr.maxset = _repr.maxfrozenset = 30
+_repr.maxstring = _repr.maxlong = _repr.maxother = _STRING
+
+
+def _message(exc: BaseException) -> str:
+    # The built-in str() of an exception is the full repr of its container arguments, which can be any size.
+    arg = exc.args[0] if len(exc.args) == 1 else exc.args or None
+    builtin = type(exc).__str__ in (BaseException.__str__, KeyError.__str__)
+    if builtin and isinstance(arg, (list, tuple, dict, set, frozenset)):
+        try:
+            return _repr.repr(arg)
+        except Exception:
+            return f'[unprintable {type(exc).__name__}]'
+    return _str(exc)[:_LINE]
+
+
 def _exception(exc: BaseException, depth: int = 1, seen: set[int] | None = None) -> dict[str, _Json]:
     seen = seen or set()
     seen.add(id(exc))
@@ -203,7 +222,7 @@ def _exception(exc: BaseException, depth: int = 1, seen: set[int] | None = None)
     last = frames[-1] if frames else None
     data: dict[str, _Json] = {
         'class': f'{type(exc).__module__}.{type(exc).__qualname__}'.removeprefix('builtins.'),
-        'message': _str(exc)[:_LINE],
+        'message': _message(exc),
         'code': exc.args[0] if exc.args and isinstance(exc.args[0], int) and not isinstance(exc.args[0], bool) else 0,
         'file': f'{last.filename}:{last.lineno}' if last else '',
         # Innermost frame first, like PHP; 'trace' must exist for the trace view.

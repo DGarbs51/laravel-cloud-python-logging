@@ -228,6 +228,27 @@ def test_platform_fields_win_over_broken_extras():
     assert fmt(exception={10**5000: 1})['context']['exception'] == {'[unprintable int]': 1}
 
 
+def test_exception_message_from_huge_arguments_is_bounded():
+    fan = [[[0] * 1000] * 1000] * 1000  # str() of this exception would be about 3 GB
+    for error in (ValueError(fan), KeyError(fan)):
+        tracemalloc.start()
+        try:
+            message = fmt(exc_info=(type(error), error, None))['context']['exception']['message']
+            used = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert message.startswith('[[[0, 0, 0')
+        assert message.endswith(', ...]')  # reprlib's marker for items left out
+        assert len(message) < 100_000
+        assert used < 8 * 2**20, f'{used / 2**20:.1f} MiB'
+    # Small arguments read exactly like str().
+    for error in (ValueError(), ValueError('a', 'b'), ValueError([1, 2]), KeyError('x'), OSError(2, 'missing')):
+        assert fmt(exc_info=(type(error), error, None))['context']['exception']['message'] == str(error)
+    unprintable = ValueError({'k': 10**5000})
+    message = fmt(exc_info=(ValueError, unprintable, None))['context']['exception']['message']
+    assert 'digits' in message if sys.version_info >= (3, 13) else message == '[unprintable ValueError]'
+
+
 def test_deep_cause_chain_and_float_subclass():
     error = None
     for i in range(9):
