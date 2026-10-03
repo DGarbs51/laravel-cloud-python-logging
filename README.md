@@ -58,9 +58,38 @@ configure(level=None, *, exceptions=True, access_logs=False)
 - `exceptions=False`: do not log uncaught exceptions.
 - `access_logs=True`: keep your server's access logs. They are off by default, because Cloud already logs every request.
 
+## Local development
+
+Off Cloud, when stdout is a terminal, `configure()` prints readable lines instead of JSON:
+
+```
+14:19:23 INFO    Order shipped  order_id=42
+14:19:24 ERROR   Request failed
+    RuntimeError: payment declined
+      at /app/billing.py:88
+    Caused by TimeoutError: timed out
+      at /app/gateway.py:31
+```
+
+Piped output, CI and Cloud keep the JSON lines. Set `LOG_FORMAT=json` or `LOG_FORMAT=line` to choose. On Cloud (`LARAVEL_CLOUD=1`), lines are always JSON. Colors are on only in a terminal and only when `NO_COLOR` is not set. Control characters in messages and values print escaped.
+
+To read JSON lines, filter them, or run your server through the viewer, use `pretty`. It works like Laravel's `php artisan pail`:
+
+```sh
+python -m laravel_cloud_logging.pretty -- uvicorn app:app --reload
+python -m laravel_cloud_logging.pretty --level warning -- celery -A tasks worker
+python -m laravel_cloud_logging.pretty --request 9f1c... < saved.log
+```
+
+- `--level LEVEL`: show this level and above.
+- `--request ID`: show only records with this `cloud_request_id`.
+- `--grep TEXT`: show only lines that contain this text. Case does not matter.
+
+After `--`, `pretty` runs the command, reads its stdout and stderr, and exits with the command's exit code. It forwards `SIGTERM` to the command. Lines that are not records, such as server boot lines and `print()` output, pass through unchanged. `--level` and `--request` hide them. Without filters, a prompt such as `(Pdb)` shows before its newline, so `breakpoint()` works. Without `--`, `pretty` reads stdin.
+
 ## What `configure()` does
 
-- Sends every log record to Cloud as one JSON line, in the Monolog format that Laravel uses.
+- Sends every log record to Cloud as one JSON line, in the Monolog format that Laravel uses. In a local terminal, it prints readable lines instead. See [Local development](#local-development).
 - Takes over the root logger and common framework loggers (`uvicorn`, `gunicorn`, `django`, `celery` and others).
 - Captures `warnings` and uncaught exceptions, including exceptions in threads.
 - Turns off server access logs. Cloud's nginx already logs each request.
@@ -108,7 +137,7 @@ Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exc
 
 Each record is one JSON line with the keys `message`, `context`, `level`, `level_name`, `channel`, `datetime` and `extra`. Your `extra=` fields always go inside `context`. The package never adds other top-level keys, because Cloud uses top-level keys to choose how to parse a line.
 
-- **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole. If the socket fails, or you are not on Cloud, lines go to stdout.
+- **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole. If the socket fails, or you are not on Cloud, lines go to stdout. The format is chosen from `LARAVEL_CLOUD`, not from the transport, so the stdout fallback on Cloud is still JSON.
 - **Size cap:** Each line is at most 256 KiB. Long messages and traces are cut first, then extra context. Cloud turns records over 1 MB into plain text, so this cap keeps large records structured.
 - **Normalization:** Like Monolog, context stops at 9 levels deep and 1,000 items per container. Each record also has a budget of 10,000 values and about 1M characters, so shared or cyclic references cannot fan out. Values past the budget become `Over normalization budget, aborting normalization`. `cloud_request_id`, `exception` and `stack` sit outside the budget, so only the size cap can drop them. Exception messages built from containers or bytes use a bounded repr: 30 items per container, 3 levels, 1,000 characters per value and 256K characters in total. The formatter cannot bound memory used by your own `__str__` methods or `%`-format arguments.
 - **Channel:** `APP_ENV`, then `LARAVEL_CLOUD_ENV_NAME`, then `local`.

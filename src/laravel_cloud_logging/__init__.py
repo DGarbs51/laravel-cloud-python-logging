@@ -5,7 +5,8 @@ Records are written in the Monolog JSON shape Laravel uses on Laravel Cloud
 exceptions and context render the same way as a Laravel app's logs. On Cloud
 (LARAVEL_CLOUD=1) lines go to the platform log socket, which keeps lines from
 concurrent workers whole; if the socket fails, the line goes to stdout instead.
-Off Cloud, lines go to stdout. Logging never raises into the app.
+Off Cloud, lines go to stdout, as readable lines when stdout is a terminal
+(LOG_FORMAT=json|line overrides). Logging never raises into the app.
 No redaction: keep secrets out of messages and extra fields.
 See README.md for per-framework setup.
 """
@@ -29,11 +30,11 @@ import time
 import traceback
 from array import array
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Iterable, MutableMapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, MutableMapping
 from datetime import datetime, timezone
 from itertools import islice
 from types import TracebackType
-from typing import TYPE_CHECKING, TypedDict, TypeVar, cast, overload
+from typing import IO, TYPE_CHECKING, TypedDict, TypeVar, cast, overload
 
 from ._headers import header_id as _header_id
 
@@ -89,6 +90,7 @@ __all__ = [
     'EMERGENCY',
     'NOTICE',
     'CloudHandler',
+    'LineFormatter',
     'MonologFormatter',
     'asgi_middleware',
     'cloud_request_id',
@@ -353,6 +355,79 @@ class MonologFormatter(logging.Formatter):
         return _dumps(data)
 
 
+class LineFormatter(MonologFormatter):
+    """Readable lines for a local terminal; configure() picks it off Cloud when stdout is a TTY."""
+
+    def __init__(self, channel: str | None = None, color: bool | None = None) -> None:
+        super().__init__(channel)
+        self.color = _color(sys.__stdout__) if color is None else color
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            return _render(self._record(record), self.color)
+        except Exception:
+            return _render(self._base(record, 'log record formatting failed', {}), self.color)
+
+
+# SGR codes for the readable format.
+_COLORS = {
+    'DEBUG': '2',
+    'INFO': '34',
+    'NOTICE': '36',
+    'WARNING': '33',
+    'ERROR': '31',
+    'CRITICAL': '1;31',
+    'ALERT': '1;31',
+    'EMERGENCY': '1;37;41',
+}
+# Control characters other than newline print escaped, so a logged value can't drive the terminal.
+_CONTROL = {c: f'\\x{c:02x}' for c in (*range(32), *range(127, 160)) if c != 10}
+
+
+def _tty(stream: IO[str] | None) -> bool:
+    with contextlib.suppress(Exception):  # closed or detached streams raise
+        return stream is not None and stream.isatty()
+    return False
+
+
+def _color(stream: IO[str] | None) -> bool:
+    return _tty(stream) and not os.environ.get('NO_COLOR')
+
+
+def _text(value: object) -> str:
+    text = value if isinstance(value, str) else _dumps(value)
+    # Continuation lines are indented, so a newline in a value can't pass for a record of its own.
+    return text.translate(_CONTROL).replace('\n', '\n    ')
+
+
+def _render(data: Mapping[str, object], color: bool = False) -> str:
+    """A Monolog record as one readable line, plus indented exception lines. Works on any parsed JSON object."""
+
+    def paint(text: str, code: str) -> str:
+        return f'\033[{code}m{text}\033[0m' if color else text
+
+    name, when = _text(data.get('level_name', '')), _text(data.get('datetime', ''))
+    with contextlib.suppress(ValueError):  # not ISO 8601: show it as it is
+        when = datetime.fromisoformat(when).astimezone().strftime('%H:%M:%S')
+    raw = data.get('context')
+    context = cast('dict[str, object]', raw) if isinstance(raw, dict) else {}
+    pairs = ''.join(
+        f' {paint(_text(k), "2")}={_text(v)}' for k, v in context.items() if k not in ('exception', 'stack')
+    )
+    lines = [f'{paint(when, "2")} {paint(f"{name:<7}", _COLORS.get(name, "0"))} {_text(data.get("message", ""))}']
+    lines[0] += f' {pairs}' if pairs else ''
+    exc, prefix = context.get('exception'), ''
+    while isinstance(exc, dict):
+        exc = cast('dict[str, object]', exc)
+        lines.append(f'    {prefix}{paint(_text(exc.get("class", "")), "31")}: {_text(exc.get("message", ""))}')
+        if exc.get('file'):
+            lines.append(f'      at {_text(exc["file"])}')
+        exc, prefix = exc.get('previous'), 'Caused by '
+    if isinstance(stack := context.get('stack'), str):
+        lines.append('    ' + _text(stack))
+    return '\n'.join(lines)
+
+
 def _fits(line: str) -> bool:
     # The budget includes the newline the handler adds.
     return len(line.encode(errors=_ESCAPE)) < _LINE
@@ -458,10 +533,14 @@ def configure(
     if not access_logs:
         for name in _ACCESS:
             loggers[name] = {'handlers': [], 'level': logging.CRITICAL + 100, 'propagate': False}
+    # Readable lines only off Cloud: there even the stdout fallback must stay JSON for the dashboard.
+    choice = os.environ.get('LOG_FORMAT', '').lower()
+    lines = choice == 'line' or (choice != 'json' and _tty(sys.__stdout__))
+    formatter = LineFormatter if lines and os.environ.get('LARAVEL_CLOUD') != '1' else MonologFormatter
     config: dict[str, object] = {
         'version': 1,
         'disable_existing_loggers': False,
-        'formatters': {'monolog': {'()': MonologFormatter}},
+        'formatters': {'monolog': {'()': formatter}},
         'handlers': {'cloud': {'()': CloudHandler, 'formatter': 'monolog'}},
         'root': {'handlers': ['cloud'], 'level': level},
         'loggers': loggers,

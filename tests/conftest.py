@@ -8,8 +8,9 @@ import laravel_cloud_logging
 
 
 @pytest.fixture(autouse=True)
-def restore_logging():
+def restore_logging(monkeypatch):
     """configure() installs excepthooks and root handlers; undo them so asserts print normally."""
+    monkeypatch.setenv('LOG_FORMAT', 'json')  # tests parse JSON even when run with -s in a terminal
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
     token = laravel_cloud_logging.cloud_request_id.set(None)  # middleware tests set it without reset
