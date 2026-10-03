@@ -8,7 +8,7 @@
 2. python scripts/live_check.py verify <app> <env> <marker> <from> <to>
    Reads the window back with `cpx cloud environment:logs --json` and checks
    types, levels, the exception entry, 40/40 concurrent lines and the large record.
-Then check the dashboard Logs page by hand: level tags/colours and the exception chain.
+Then check the dashboard Logs page by hand: level tags/colors and the exception chain.
 """
 
 import base64

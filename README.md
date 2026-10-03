@@ -125,7 +125,7 @@ CI runs the tests on Python 3.10 to 3.15 and requires 100% line and branch cover
 1. Run `python scripts/live_check.py command <env>`. It prints a `cpx cloud command:run` command and a marker. You do not need to deploy anything.
 2. Run the printed command. It prints the marker and a `from`/`to` time window.
 3. Run `python scripts/live_check.py verify <app> <env> <marker> <from> <to>`. It checks levels, the exception, the request ID, concurrent writes and the size cap.
-4. On the dashboard Logs page, check the level colours and the exception chain. The logs API does not return the `previous` chain, so check it in the dashboard.
+4. On the dashboard Logs page, check the level colors and the exception chain. The logs API does not return the `previous` chain, so check it in the dashboard.
 
 Run the check on a shared (Flex) environment and on a private one.
 
