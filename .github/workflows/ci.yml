@@ -95,7 +95,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv build
-      - run: uvx twine@7.0.0 check --strict dist/*
+      - run: uv run --only-group release twine check --strict dist/*
       - name: Wheel declares no runtime dependencies
         run: unzip -p dist/*.whl '*/METADATA' | (! grep -q '^Requires-Dist')
       - name: Wheel ships the py.typed marker

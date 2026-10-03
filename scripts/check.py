@@ -44,7 +44,7 @@ def packaging() -> tuple[bool, str]:
         if not ok:
             return ok, output
         wheel, sdist = next(Path(out).glob('*.whl')), next(Path(out).glob('*.tar.gz'))
-        ok, output = run(('uvx', 'twine@7.0.0', 'check', '--strict', str(wheel), str(sdist)))
+        ok, output = run((*RUN, 'twine', 'check', '--strict', str(wheel), str(sdist)))
         if not ok:
             return ok, output
         with zipfile.ZipFile(wheel) as zf:

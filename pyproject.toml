@@ -49,8 +49,10 @@ test = [
     "pytest", "pytest-timeout", "coverage", "flask", "starlette", "httpx2", "django", "celery", "gunicorn", "rq",
     "uvicorn", "hypercorn", "granian", "waitress",
 ]
+release = ["twine"]
 dev = [
     { include-group = "test" },
+    { include-group = "release" },
     "celery-types>=0.26.0",
     "django-stubs>=6.0.9",
     "mypy>=2.4.0",
