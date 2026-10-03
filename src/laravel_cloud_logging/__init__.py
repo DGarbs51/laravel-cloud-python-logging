@@ -27,6 +27,8 @@ import sys
 import threading
 import time
 import traceback
+from array import array
+from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Iterable, MutableMapping
 from datetime import datetime, timezone
 from itertools import islice
@@ -152,7 +154,12 @@ class _Normalizer:
             return out
         if isinstance(value, BaseException):
             self.nodes -= _TRACE  # a trace can be _TRACE frames
-            return _exception(value, depth)
+            data = _exception(value, depth)
+            node: _Json = data
+            while isinstance(node, dict):  # charge every message in the cause chain
+                self.chars -= len(str(node['message']))
+                node = node.get('previous')
+            return data
         if isinstance(value, datetime):
             return value.isoformat()
         return self.string(value)
@@ -161,11 +168,11 @@ class _Normalizer:
         out: dict[str, _Json] = {}
         for i, (k, v) in enumerate(value.items()):
             if i == _ITEMS:
-                out['...'] = _over_items(len(value))
+                out.setdefault('...', _over_items(len(value)))  # never overwrite a user key
                 break
             key = self.string(k)
             if self.nodes < 0 or self.chars < 0:
-                out['...'] = _OVER  # one marker, never a key that could overwrite another
+                out.setdefault('...', _OVER)  # one marker, never overwriting a user key
                 break
             out[key] = self.clean(v, depth + 1)
         return out
@@ -199,19 +206,58 @@ def _cut(value: object, limit: int = _STRING) -> object:
     return raw[:limit].decode(errors='ignore') + ' [truncated]'
 
 
-_repr = reprlib.Repr()  # bounded repr: 30 items per container, 3 levels, strings cut at _STRING
-_repr.maxlevel = 3
-_repr.maxdict = _repr.maxlist = _repr.maxtuple = _repr.maxset = _repr.maxfrozenset = 30
-_repr.maxstring = _repr.maxlong = _repr.maxother = _STRING
+class _Repr(reprlib.Repr):
+    """reprlib minus its gaps: buffers are sliced before repr(); dicts and sets keep their order, never sorted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # 30 items per container, 3 levels, 1,000 characters per value, and _LINE characters in total.
+        self.maxlevel = 3
+        self.maxdict = self.maxlist = self.maxtuple = self.maxset = self.maxfrozenset = 30
+        self.maxdeque = self.maxarray = 30
+        self.maxstring = self.maxlong = self.maxother = 1000
+        self.left = _LINE
+
+    def repr1(self, x: object, level: int) -> str:
+        if self.left <= 0:
+            return '...'
+        text = super().repr1(x, level)
+        self.left -= len(text)
+        return text
+
+    def repr_bytes(self, x: bytes, level: int) -> str:
+        return self.repr_str(cast('str', x), level)  # repr_str slices before repr(), and works on bytes
+
+    repr_bytearray = repr_bytes
+
+    def repr_dict(self, x: dict[object, object], level: int) -> str:
+        pairs = (f'{self.repr1(k, level - 1)}: {self.repr1(v, level - 1)}' for k, v in x.items())
+        return self._items(pairs, len(x), level, '{', '}') if x else '{}'
+
+    def repr_set(self, x: set[object], level: int) -> str:
+        return self._items((self.repr1(v, level - 1) for v in x), len(x), level, '{', '}') if x else 'set()'
+
+    def repr_frozenset(self, x: frozenset[object], level: int) -> str:
+        items = (self.repr1(v, level - 1) for v in x)
+        return self._items(items, len(x), level, 'frozenset({', '})') if x else 'frozenset()'
+
+    def _items(self, items: Iterable[str], total: int, level: int, left: str, right: str) -> str:
+        if level <= 0:
+            return f'{left}...{right}'
+        pieces = list(islice(items, self.maxdict))
+        return left + ', '.join(pieces + ['...'] * (total > self.maxdict)) + right
+
+
+_CONTAINERS = (list, tuple, dict, set, frozenset, deque, array, bytes, bytearray)
 
 
 def _message(exc: BaseException) -> str:
     # The built-in str() of an exception is the full repr of its container arguments, which can be any size.
     arg = exc.args[0] if len(exc.args) == 1 else exc.args or None
     builtin = type(exc).__str__ in (BaseException.__str__, KeyError.__str__)
-    if builtin and isinstance(arg, (list, tuple, dict, set, frozenset)):
+    if builtin and isinstance(arg, _CONTAINERS):
         try:
-            return _repr.repr(arg)
+            return _Repr().repr(arg)  # one per call: it counts what it has written
         except Exception:
             return f'[unprintable {type(exc).__name__}]'
     return _str(exc)[:_LINE]
@@ -271,9 +317,8 @@ class MonologFormatter(logging.Formatter):
         if record.stack_info:
             keep['stack'] = record.stack_info[:_LINE]
         # Extras that keep overrides are skipped, so a broken one can't fail the whole record.
-        context: dict[object, object] = {
-            k: v for k, v in record.__dict__.items() if k not in _STANDARD and k not in keep
-        }
+        extras = ((k, v) for k, v in record.__dict__.items() if k not in _STANDARD and k not in keep)
+        context: dict[object, object] = dict(islice(extras, _ITEMS + 1))  # one past the limit marks the cut
         extra = _Normalizer().clean_dict(context, 1)
         return self._base(record, record.getMessage(), {**extra, **keep})
 

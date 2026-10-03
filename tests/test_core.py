@@ -1,4 +1,6 @@
+import array
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -150,6 +152,10 @@ def test_normalization_budget_bounds_work_and_keeps_platform_fields():
     assert kept[OVER] == 'keep me'
     assert kept['s5'] == kept['...'] == OVER
     assert 's6' not in kept
+    # A user key '...' is never overwritten by a marker either.
+    dots = fmt(**{'...': 'keep me'}, **{f's{i}': 'y' * 200_000 for i in range(8)})['context']
+    assert dots['...'] == 'keep me'
+    assert dots['s5'] == OVER
 
     shared = {'k': 1}
     error = ValueError('shared')
@@ -178,9 +184,11 @@ def test_huge_scalars_are_sliced_before_conversion():
             assert len(self) <= 256 * 1024, 'encoded the whole oversized string'
             return super().encode(*args, **kwargs)
 
-    text = fmt(value=Sliced('😀' * 300_000))['context']['value']
+    text = lcl._cut(Sliced('😀' * 300_000))
     assert text.endswith(' [truncated]')
     assert len(text.encode()) <= 16384 + 12
+    # Over the character budget it would become a marker; sliced first, it is kept and cut.
+    assert fmt(value='x' * 2_000_000)['context']['value'].endswith(' [truncated]')
 
     def peak(make_record, formatter=None):
         record = make_record()  # inputs are built before measuring
@@ -193,6 +201,7 @@ def test_huge_scalars_are_sliced_before_conversion():
 
     huge = b'\x00' * 12_500_000
     error = ValueError('e' * 12_500_000)
+    extras = [f'k{i}' for i in range(1_000_000)]
     cases = [
         (lambda: record_with(payload=huge), None),
         (lambda: record_with(payload=bytearray(huge)), None),
@@ -201,6 +210,8 @@ def test_huge_scalars_are_sliced_before_conversion():
         (lambda: logging.LogRecord('n' * 12_500_000, logging.ERROR, '', 1, 'm', (), None), None),
         (lambda: logging.LogRecord('app', logging.ERROR, '', 1, 'x' * 12_500_000, (), None), None),
         (lambda: record_with(), MonologFormatter(channel='c' * 12_500_000)),
+        (lambda: record_with(errors=[ValueError('x' * 300_000)] * 1000), None),  # exception messages use the budget
+        (lambda: record_with(**dict.fromkeys(extras, 0)), None),  # only the first 1,001 extras are copied
     ]
     for make_record, formatter in cases:
         entry, used = peak(make_record, formatter)
@@ -230,21 +241,46 @@ def test_platform_fields_win_over_broken_extras():
 
 
 def test_exception_message_from_huge_arguments_is_bounded():
+    blob = b'\x00' * 12_500_000
     fan = [[[0] * 1000] * 1000] * 1000  # str() of this exception would be about 3 GB
-    for error in (ValueError(fan), KeyError(fan)):
-        tracemalloc.start()
-        try:
-            message = fmt(exc_info=(type(error), error, None))['context']['exception']['message']
-            used = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-        assert message.startswith('[[[0, 0, 0')
-        assert message.endswith(', ...]')  # reprlib's marker for items left out
-        assert len(message) < 100_000
-        assert used < 8 * 2**20, f'{used / 2**20:.1f} MiB'
-    # Small arguments read exactly like str().
-    for error in (ValueError(), ValueError('a', 'b'), ValueError([1, 2]), KeyError('x'), OSError(2, 'missing')):
+    huge = (
+        fan,
+        blob,
+        bytearray(blob),
+        [blob],
+        array.array('B', blob),
+        collections.deque([0] * 1_000_000),
+        set(range(1_000_000)),
+        {i: i for i in range(1_000_000)},
+        [[['x' * 16384] * 30] * 30] * 30,  # each value is small, the total is not
+    )
+    for arg in huge:
+        for error in (ValueError(arg), KeyError(arg)):
+            tracemalloc.start()
+            try:
+                message = fmt(exc_info=(type(error), error, None))['context']['exception']['message']
+                used = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+            assert len(message) <= 256 * 1024
+            assert used < 8 * 2**20, f'{type(arg).__name__}: {used / 2**20:.1f} MiB'
+    # Small arguments read exactly like str(), in their own order.
+    small = (
+        ValueError(),
+        ValueError('a', 'b'),
+        ValueError([1, 2]),
+        ValueError({'b': 1, 'a': 2}),
+        ValueError({3, 1}),
+        ValueError(frozenset()),
+        ValueError(b'abc'),
+        ValueError(collections.deque([1])),
+        KeyError('x'),
+        OSError(2, 'missing'),
+    )
+    for error in small:
         assert fmt(exc_info=(type(error), error, None))['context']['exception']['message'] == str(error)
+    deep = ValueError([[[{1: 2}, {3}]]])  # past 3 levels, containers become markers
+    assert fmt(exc_info=(ValueError, deep, None))['context']['exception']['message'] == '[[[{...}, {...}]]]'
     unprintable = ValueError({'k': 10**5000})
     message = fmt(exc_info=(ValueError, unprintable, None))['context']['exception']['message']
     assert 'digits' in message if sys.version_info >= (3, 13) else message == '[unprintable ValueError]'
