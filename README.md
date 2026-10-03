@@ -136,7 +136,7 @@ Publishing uses PyPI trusted publishing. See `.github/workflows/publish.yml`.
 
 1. Set `version` in `pyproject.toml`, run `uv lock`, and merge to `main`.
 2. TestPyPI: `gh workflow run publish.yml --ref main`.
-3. PyPI: `gh release create v<version> --generate-notes`, then approve the `pypi` environment.
+3. PyPI: `gh release create v<version> --generate-notes`.
 
 ## License
 
