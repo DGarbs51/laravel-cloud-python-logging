@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import threading
+import tracemalloc
 import warnings
 from contextlib import closing
 from datetime import datetime, timezone
@@ -139,10 +140,16 @@ def test_normalization_budget_bounds_work_and_keeps_platform_fields():
     # Ordinary context is cut where the budget runs out; platform fields are never dropped.
     assert rows['rows'][-1] == OVER
     assert 900 < sum(isinstance(row, dict) for row in rows['rows']) < 1000
-    assert OVER in wide
+    assert wide['s5'] == OVER
     for context in (rows, wide):
         assert context['cloud_request_id'] == 'req-7'
         assert context['exception']['message'] == 'boom'
+
+    # Keys past the budget are never replaced by a shared marker that could overwrite a kept value.
+    kept = fmt(**{OVER: 'keep me'}, **{f's{i}': 'y' * 200_000 for i in range(8)})['context']
+    assert kept[OVER] == 'keep me'
+    assert kept['s5'] == kept['...'] == OVER
+    assert 's6' not in kept
 
     shared = {'k': 1}
     error = ValueError('shared')
@@ -174,8 +181,71 @@ def test_huge_scalars_are_sliced_before_conversion():
     text = fmt(value=Sliced('😀' * 300_000))['context']['value']
     assert text.endswith(' [truncated]')
     assert len(text.encode()) <= 16384 + 12
-    for payload in (b'\x00' * 1_000_000, bytearray(1_000_000), memoryview(bytes(1_000_000))):
-        assert fmt(payload=payload)['context']['payload'].endswith(' [truncated]')
+
+    def peak(make_record, formatter=None):
+        record = make_record()  # inputs are built before measuring
+        tracemalloc.start()
+        try:
+            line = (formatter or MonologFormatter()).format(record)
+            return json.loads(line), tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    huge = b'\x00' * 12_500_000
+    error = ValueError('e' * 12_500_000)
+    cases = [
+        (lambda: record_with(payload=huge), None),
+        (lambda: record_with(payload=bytearray(huge)), None),
+        (lambda: record_with(data={huge: 1}), None),
+        (lambda: record_with(exc_info=(ValueError, error, None)), None),
+        (lambda: logging.LogRecord('n' * 12_500_000, logging.ERROR, '', 1, 'm', (), None), None),
+        (lambda: record_with(), MonologFormatter(channel='c' * 12_500_000)),
+    ]
+    for make_record, formatter in cases:
+        entry, used = peak(make_record, formatter)
+        assert list(entry) == KEYS
+        assert used < 8 * 2**20, f'{used / 2**20:.1f} MiB'
+
+    # A memoryview keeps its opaque repr, so its contents are never copied or logged.
+    view = memoryview(huge).cast('B', shape=[1, len(huge)])
+    entry, used = peak(lambda: record_with(payload=view))
+    assert entry['context']['payload'].startswith('<memory at ')
+    assert used < 2**20
+
+
+def record_with(**extra):
+    record = logging.LogRecord('app', logging.ERROR, '', 1, 'm', (), extra.pop('exc_info', None))
+    record.__dict__.update(extra)
+    return record
+
+
+def test_platform_fields_win_over_broken_extras():
+    error = ValueError('real error')
+    entry = fmt(exception={10**5000: 1}, exc_info=(ValueError, error, None))
+    assert entry['message'] == 'hello world'
+    assert entry['context']['exception']['message'] == 'real error'
+    # Without exc_info the user's value is kept; an unprintable key degrades instead of failing the record.
+    assert fmt(exception={10**5000: 1})['context']['exception'] == {'[unprintable int]': 1}
+
+
+def test_deep_cause_chain_and_float_subclass():
+    error = None
+    for i in range(9):
+        try:
+            raise ValueError(str(i)) from error
+        except ValueError as raised:
+            error = raised
+    exc = fmt(exc_info=(ValueError, error, error.__traceback__))['context']['exception']
+    while 'previous' in exc:
+        assert exc['trace'], exc['message']
+        exc = exc['previous']
+    assert exc['trace']
+
+    class Loud(float):
+        def __str__(self):
+            return 'B' * 1_000_000
+
+    assert fmt(n=Loud('nan'))['context']['n'] == 'nan'
 
 
 def test_stack_info():
@@ -565,6 +635,12 @@ def test_handler_lines_never_exceed_256_kib():
     assert len(entries) == 3
     assert all(list(e) == KEYS and e['level_name'] == 'ERROR' for e in entries)
     assert all(len(line) + 1 <= 256 * 1024 for line in raw.split(b'\n') if line)
+
+    # Every byte of the three free-form fields becomes a six-byte \u0000 escape.
+    nul = '\x00' * 20_000
+    line = MonologFormatter(channel=nul).format(logging.LogRecord(nul, logging.ERROR, '', 1, nul, (), None))
+    assert len(line.encode()) + 1 <= 256 * 1024
+    assert json.loads(line)['level_name'] == 'ERROR'
 
 
 def test_handler_failures_never_raise():
