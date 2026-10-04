@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "laravel-cloud-logging"
-version = "0.3.0"
+version = "0.3.1"
 description = "Laravel-style (Monolog JSON) logging for Python apps on Laravel Cloud"
 readme = "README.md"
 license = "MIT"
@@ -49,8 +49,22 @@ include = ["/src", "/README.md", "/LICENSE"]  # anchored: a bare "src" also matc
 
 [dependency-groups]
 test = [
-    "pytest", "pytest-timeout", "coverage", "flask", "starlette", "httpx2", "django", "celery", "gunicorn", "rq",
-    "uvicorn", "hypercorn", "granian", "waitress",
+    "pytest",
+    "pytest-timeout",
+    "coverage",
+    "flask",
+    "starlette",
+    "httpx2",
+    "django",
+    "celery",
+    "gunicorn",
+    "rq",
+    "uvicorn",
+    "hypercorn",
+    "granian",
+    "waitress",
+    "daphne>=4.2.3",
+    "pyuwsgi>=2.0.30.post1 ; python_full_version < '3.15'",
 ]
 release = ["twine"]
 dev = [

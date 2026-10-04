@@ -94,3 +94,11 @@ def fmt(**kwargs):
     )
     record.__dict__.update(kwargs)
     return json.loads(MonologFormatter(channel='production').format(record))
+
+
+def lines_after(action):
+    """Run action off Cloud and return the records it logged to stdout."""
+    with patch.dict(os.environ, {'LARAVEL_CLOUD': ''}), captured_stdout() as stdout:
+        action()
+        sys.__stdout__.flush()
+        return stdout()
