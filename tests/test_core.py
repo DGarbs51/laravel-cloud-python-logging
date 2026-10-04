@@ -241,6 +241,11 @@ def test_platform_fields_win_over_broken_extras():
     assert fmt(exception={10**5000: 1})['context']['exception'] == {'[unprintable int]': 1}
 
 
+def test_uvicorn_color_message_is_not_context():
+    entry = fmt(color_message='hello \x1b[36m%s\x1b[0m', user_id=7)
+    assert entry['context'] == {'user_id': 7}
+
+
 def test_exception_message_from_huge_arguments_is_bounded():
     blob = b'\x00' * 12_500_000
     fan = [[[0] * 1000] * 1000] * 1000  # str() of this exception would be about 3 GB
