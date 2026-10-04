@@ -20,6 +20,18 @@ uv run ty check && uv run mypy && uv run pyright    # type checks (all three mus
 
 `solo.yml` defines the same commands as Solo processes (update uv/pythons/deps, sync, fix, check).
 
+Change project metadata and dependencies with `uv` commands, not by editing `pyproject.toml` or `uv.lock` by hand. The commands keep the lockfile in sync.
+
+```sh
+uv version --bump patch                   # or minor/major; updates pyproject.toml and uv.lock
+uv add --group dev <pkg>                  # tooling; frameworks for integration tests go in --group test. Never a runtime dependency (see Gates)
+uv remove --group dev <pkg>
+uv lock --upgrade                         # bump all locked versions
+uv lock --upgrade-package <pkg>           # bump one
+```
+
+Edit `pyproject.toml` directly only for settings no `uv` command manages (tool config such as ruff, mypy, coverage).
+
 ## Gates (enforced in CI, mirrored by `scripts/check.py`)
 
 - 100% line **and** branch coverage, combined across all Python versions. A single-version local run can show version-specific branches (e.g. `sys.version_info` checks) as missed; use `scripts/check.py` for the real number.
@@ -49,7 +61,7 @@ Nearly everything lives in `src/laravel_cloud_logging/__init__.py`:
 
 ## Releasing
 
-Bump `version` in `pyproject.toml`, `uv lock`, merge to `main`; then `gh workflow run publish.yml --ref main` (TestPyPI) and `gh release create v<version> --generate-notes` (PyPI, trusted publishing).
+Run `uv version --bump patch` (or `minor`/`major`), merge to `main`; then `gh workflow run publish.yml --ref main` (TestPyPI) and `gh release create v<version> --generate-notes` (PyPI, trusted publishing).
 
 <!-- caveman-begin -->
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
