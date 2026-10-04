@@ -35,6 +35,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+laravel-cloud-logging-config = "laravel_cloud_logging.config:main"
+
 [project.urls]
 Homepage = "https://github.com/DGarbs51/laravel-cloud-python-logging"
 Source = "https://github.com/DGarbs51/laravel-cloud-python-logging"

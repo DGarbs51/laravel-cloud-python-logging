@@ -242,10 +242,9 @@ def test_server_main_process_logs_json_with_log_config_file(tmp_path, server, so
     (tmp_path / 'app.py').write_text(source)
     env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'PYTHONUNBUFFERED': '1'}
     env.pop('LARAVEL_CLOUD', None)
-    dump = subprocess.run(
-        [sys.executable, '-m', 'laravel_cloud_logging.config'], env=env, capture_output=True, text=True, check=True
+    subprocess.run(
+        [sys.executable, '-m', 'laravel_cloud_logging.config', 'logging.json'], cwd=tmp_path, env=env, check=True
     )
-    (tmp_path / 'logging.json').write_text(dump.stdout)
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]

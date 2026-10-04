@@ -50,20 +50,20 @@ Your server may need one more step:
 
 ### Log config file
 
-The main process of Uvicorn (with several workers) and Granian never imports your app, so `configure()` does not run there. Its boot, worker and shutdown lines would be plain text. Both servers read a JSON logging config file in the main process. Write one with:
+The main process of Uvicorn (with several workers) and Granian never imports your app, so `configure()` does not run there. Its boot, worker and shutdown lines would be plain text. Both servers read a JSON logging config file in the main process. On Laravel Cloud, add this to your environment's build commands, after your dependencies install:
 
 ```sh
-python -m laravel_cloud_logging.config > logging.json
+laravel-cloud-logging-config logging.json
 ```
 
-On Laravel Cloud, add that line to your environment's build commands, after your dependencies install. Then start the server with the file:
+The file is then part of the image every replica starts from. If the command isn't on your `PATH`, run `python -m laravel_cloud_logging.config logging.json` instead. Then start the server with the file:
 
 ```sh
 uvicorn app:app --workers 4 --log-config logging.json ...
 granian --interface asgi --workers 4 --log-config logging.json ... app:app
 ```
 
-The file only sets up handlers. Keep the `configure()` call in your app module too: it also captures warnings and uncaught exceptions in each worker. The command reads `LOG_LEVEL` and `LOG_FORMAT` when it runs, and only prints the config: it does not change logging in the process that runs it. It is the dict that `configure()` returns with default arguments.
+The file only sets up handlers. Keep the `configure()` call in your app module too: it also captures warnings and uncaught exceptions in each worker. The command reads `LOG_LEVEL` and `LOG_FORMAT` when it runs. Changing them on Cloud needs a new deployment, which rebuilds the file. The file always uses JSON lines unless `LOG_FORMAT=line`, even when you run the command in a terminal. The command only writes the file: it does not change logging in the process that runs it. Without a path, it prints the config to stdout. It is the dict that `configure()` returns with default arguments.
 
 ## Options
 

@@ -470,12 +470,24 @@ def test_config_module_prints_the_config_without_applying_it(monkeypatch, capsys
     before = root.handlers[:]
     importlib.import_module('laravel_cloud_logging.config')  # importing prints nothing
     assert capsys.readouterr().out == ''
+    monkeypatch.setattr(sys, 'argv', ['laravel-cloud-logging-config'])
     monkeypatch.delitem(sys.modules, 'laravel_cloud_logging.config')  # run it fresh, as python -m does
     runpy.run_module('laravel_cloud_logging.config', run_name='__main__')
     config = json.loads(capsys.readouterr().out)
     assert config['formatters'] == {'monolog': {'()': 'laravel_cloud_logging.MonologFormatter'}}
     assert root.handlers == before
     assert sys.excepthook is sys.__excepthook__
+
+
+def test_config_command_writes_json_even_from_a_terminal(tmp_path, monkeypatch, capsys):
+    from laravel_cloud_logging import config
+
+    monkeypatch.delenv('LOG_FORMAT')
+    monkeypatch.setattr(lcl, '_tty', lambda stream: True)
+    config.main([str(tmp_path / 'logging.json')])
+    written = json.loads((tmp_path / 'logging.json').read_text())
+    assert written['formatters'] == {'monolog': {'()': 'laravel_cloud_logging.MonologFormatter'}}
+    assert 'Wrote' in capsys.readouterr().err
 
 
 @pytest.mark.skipif(not hasattr(os, 'fork'), reason='needs fork')
