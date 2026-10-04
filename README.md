@@ -41,12 +41,29 @@ Your server may need one more step:
 | Server | Setup |
 |---|---|
 | Gunicorn | In `gunicorn.conf.py`, set `logconfig_dict = configure()`. Do not set `accesslog`. |
-| Uvicorn | Call `configure()` in the app module. |
+| Uvicorn | Call `configure()` in the app module. With `--workers` above 1, also start with `--log-config logging.json`. See [Log config file](#log-config-file). |
 | Hypercorn | In `hypercorn.conf.py`, set `logconfig_dict = configure()`. Start with `hypercorn -c file:hypercorn.conf.py ...`. |
-| Granian | Call `configure()` in the app module. The main process still prints its boot lines as plain text. |
+| Granian | Call `configure()` in the app module. Start with `--log-config logging.json`. See [Log config file](#log-config-file). |
 | Waitress | Call `configure()` in the app module. |
 | Daphne | Call `configure()` in `asgi.py`. Start with `daphne -v 0 ...` to turn off its plain-text access log. |
 | uWSGI / pyuwsgi | Call `configure()` in the app module. Add `--disable-logging` to turn off its plain-text access log. Add `--die-on-term`, because uWSGI 2.0 reloads on `SIGTERM` instead of stopping. |
+
+### Log config file
+
+The main process of Uvicorn (with several workers) and Granian never imports your app, so `configure()` does not run there. Its boot, worker and shutdown lines would be plain text. Both servers read a JSON logging config file in the main process. On Laravel Cloud, add this to your environment's build commands, after your dependencies install:
+
+```sh
+laravel-cloud-logging-config logging.json
+```
+
+The file is then part of the image every replica starts from. If the command isn't on your `PATH`, run `python -m laravel_cloud_logging.config logging.json` instead. Then start the server with the file:
+
+```sh
+uvicorn app:app --workers 4 --log-config logging.json ...
+granian --interface asgi --workers 4 --log-config logging.json ... app:app
+```
+
+The file only sets up handlers. Keep the `configure()` call in your app module too: it also captures warnings and uncaught exceptions in each worker. The command reads `LOG_LEVEL` and `LOG_FORMAT` when it runs. Changing them on Cloud needs a new deployment, which rebuilds the file. The file always uses JSON lines unless `LOG_FORMAT=line`, even when you run the command in a terminal. The command only writes the file: it does not change logging in the process that runs it. Without a path, it prints the config to stdout. It is the dict that `configure()` returns with default arguments.
 
 ## Options
 
@@ -93,7 +110,7 @@ After `--`, `pretty` runs the command, reads its stdout and stderr, and exits wi
 - Takes over the root logger and common framework loggers (`uvicorn`, `gunicorn`, `django`, `celery` and others).
 - Captures `warnings` and uncaught exceptions, including exceptions in threads.
 - Turns off server access logs. Cloud's nginx already logs each request.
-- Returns a `logging.config.dictConfig` dict for servers that accept one.
+- Returns a `logging.config.dictConfig` dict for servers that accept one. The dict is plain JSON, so it also works as a [log config file](#log-config-file).
 
 It is safe to call more than once. The formatter and handler never raise an error into your app. Python's `logging` itself still checks your arguments: see [Limits](#limits).
 
@@ -130,7 +147,7 @@ Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exc
 
 ## Limits
 
-- Output from before `configure()` runs is plain text. This includes server boot lines and interpreter crashes. uWSGI's own boot lines are always plain text.
+- Output from before `configure()` runs is plain text. This includes interpreter crashes and server boot lines, unless the server reads a [log config file](#log-config-file). uWSGI's own boot lines are always plain text.
 - There is no redaction. Keep secrets out of messages and `extra=` fields.
 - Python's `logging` raises `KeyError` for `extra=` keys that are `LogRecord` attributes, such as `name`, `message` or `module`. Nest them instead: `extra={'order': {'name': name}}`.
 - An `extra=` field named `color_message` is dropped. Uvicorn uses it for an ANSI-colored copy of the message.

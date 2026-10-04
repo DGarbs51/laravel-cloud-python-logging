@@ -1,9 +1,12 @@
 import array
 import asyncio
 import collections
+import importlib
 import json
 import logging
+import logging.config
 import os
+import runpy
 import socket
 import sys
 import threading
@@ -427,7 +430,7 @@ def test_socket_transport_concurrency_and_repeat_configure(collector):
     with patch.dict(os.environ, env), captured_stdout() as stdout:
         configure()
         config = configure()
-        assert config['handlers']['cloud']['()'] is CloudHandler
+        assert config['handlers']['cloud']['()'] == 'laravel_cloud_logging.CloudHandler'
         assert len(logging.getLogger().handlers) == 1
         assert logging.getLogger().level == logging.DEBUG
 
@@ -451,6 +454,40 @@ def test_socket_transport_concurrency_and_repeat_configure(collector):
         assert len(concurrent) == 40
         assert all(len(line['message']) == 20003 for line in concurrent)
         assert stdout() == []
+
+
+def test_config_dict_round_trips_through_json_and_dictconfig():
+    config = json.loads(json.dumps(configure(exceptions=False)))
+    logging.getLogger().handlers.clear()
+    logging.config.dictConfig(config)
+    assert len(logging.getLogger().handlers) == 1
+    assert isinstance(logging.getLogger().handlers[0], CloudHandler)
+    assert isinstance(logging.getLogger().handlers[0].formatter, MonologFormatter)
+
+
+def test_config_module_prints_the_config_without_applying_it(monkeypatch, capsys):
+    root = logging.getLogger()
+    before = root.handlers[:]
+    importlib.import_module('laravel_cloud_logging.config')  # importing prints nothing
+    assert capsys.readouterr().out == ''
+    monkeypatch.setattr(sys, 'argv', ['laravel-cloud-logging-config'])
+    monkeypatch.delitem(sys.modules, 'laravel_cloud_logging.config')  # run it fresh, as python -m does
+    runpy.run_module('laravel_cloud_logging.config', run_name='__main__')
+    config = json.loads(capsys.readouterr().out)
+    assert config['formatters'] == {'monolog': {'()': 'laravel_cloud_logging.MonologFormatter'}}
+    assert root.handlers == before
+    assert sys.excepthook is sys.__excepthook__
+
+
+def test_config_command_writes_json_even_from_a_terminal(tmp_path, monkeypatch, capsys):
+    from laravel_cloud_logging import config
+
+    monkeypatch.delenv('LOG_FORMAT')
+    monkeypatch.setattr(lcl, '_tty', lambda stream: True)
+    config.main([str(tmp_path / 'logging.json')])
+    written = json.loads((tmp_path / 'logging.json').read_text())
+    assert written['formatters'] == {'monolog': {'()': 'laravel_cloud_logging.MonologFormatter'}}
+    assert 'Wrote' in capsys.readouterr().err
 
 
 @pytest.mark.skipif(not hasattr(os, 'fork'), reason='needs fork')

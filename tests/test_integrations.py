@@ -1,8 +1,15 @@
 """Each documented framework recipe, run against the real framework."""
 
+import contextlib
+import json
 import logging
 import os
+import signal
+import socket
+import subprocess
 import sys
+import time
+import urllib.request
 from unittest.mock import patch
 
 import pytest
@@ -190,3 +197,77 @@ def test_waitress_serve_level():
     logging.basicConfig()  # waitress.serve(); a no-op once root has a handler
     assert only_cloud_handler()
     assert logging.getLogger('waitress').level == logging.WARNING
+
+
+ASGI_APP = """
+from laravel_cloud_logging import asgi_middleware, configure
+
+configure()
+
+
+async def _app(scope, receive, send):
+    if scope['type'] != 'http':
+        return
+    await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+    await send({'type': 'http.response.body', 'body': b'ok'})
+
+
+app = asgi_middleware(_app)
+"""
+WSGI_APP = """
+from laravel_cloud_logging import configure, wsgi_middleware
+
+configure()
+
+
+def _app(environ, start_response):
+    start_response('200 OK', [])
+    return [b'ok']
+
+
+app = wsgi_middleware(_app)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason='multi-worker servers need fork')
+@pytest.mark.parametrize(
+    ('server', 'source', 'args'),
+    [
+        ('uvicorn', ASGI_APP, ['app:app', '--workers', '2', '--log-config', 'logging.json']),
+        ('granian', WSGI_APP, ['--interface', 'wsgi', '--workers', '2', '--log-config', 'logging.json', 'app:app']),
+    ],
+)
+def test_server_main_process_logs_json_with_log_config_file(tmp_path, server, source, args):
+    pytest.importorskip(server)
+    (tmp_path / 'app.py').write_text(source)
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'PYTHONUNBUFFERED': '1'}
+    env.pop('LARAVEL_CLOUD', None)
+    subprocess.run(
+        [sys.executable, '-m', 'laravel_cloud_logging.config', 'logging.json'], cwd=tmp_path, env=env, check=True
+    )
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    command = [sys.executable, '-m', server, '--host', '127.0.0.1', '--port', str(port), *args]
+    proc = subprocess.Popen(command, cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    started = False
+    for _ in range(300):
+        with contextlib.suppress(OSError):  # not listening yet
+            started = urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=5).read() == b'ok'
+            break
+        time.sleep(0.1)
+    proc.send_signal(signal.SIGTERM)
+    try:
+        output = proc.communicate(timeout=30)[0]
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        output = proc.communicate()[0]
+        pytest.fail(f'server did not stop:\n{output}')
+    assert started, output
+    lines = output.splitlines()
+    plain = [line for line in lines if not line.startswith('{')]
+    assert plain == []
+    entries = [json.loads(line) for line in lines]
+    assert len(entries) > 4  # boot, workers and shutdown from the main process too
+    if server == 'granian':  # its thread-count warning keeps its level
+        assert any(e['level_name'] == 'WARNING' and e['extra'] == {'logger': '_granian'} for e in entries)
