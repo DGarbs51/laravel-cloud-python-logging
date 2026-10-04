@@ -68,6 +68,7 @@ GATES: dict[str, Callable[[], tuple[bool, str]]] = {
     'ty': partial(run, (*RUN, 'ty', 'check')),
     'mypy': partial(run, (*RUN, 'mypy')),
     'pyright': partial(run, (*RUN, 'pyright')),
+    'verifytypes': partial(run, (*RUN, 'pyright', '--verifytypes', 'laravel_cloud_logging', '--ignoreexternal')),
     'packaging': packaging,
     **{
         f'py{v}': partial(

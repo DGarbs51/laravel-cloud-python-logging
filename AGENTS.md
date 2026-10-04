@@ -16,6 +16,7 @@ uv run ruff check --fix . && uv run ruff format .   # autofix
 uv run pytest -q                          # tests on the current Python
 uv run pytest tests/test_core.py::test_name -q      # single test
 uv run ty check && uv run mypy && uv run pyright    # type checks (all three must pass)
+uv run pyright --verifytypes laravel_cloud_logging --ignoreexternal   # public API type completeness (must be 100%)
 ```
 
 `solo.yml` defines the same commands as Solo processes (update uv/pythons/deps, sync, fix, check).
@@ -35,7 +36,7 @@ Edit `pyproject.toml` directly only for settings no `uv` command manages (tool c
 ## Gates (enforced in CI, mirrored by `scripts/check.py`)
 
 - 100% line **and** branch coverage, combined across all Python versions. A single-version local run can show version-specific branches (e.g. `sys.version_info` checks) as missed; use `scripts/check.py` for the real number.
-- Strict typing in three checkers: mypy (`strict`, `disallow_any_explicit`), pyright (`strict`), ty (warnings are errors). Unused ignore comments are errors. Type checks cover `src/` only.
+- Strict typing in three checkers: mypy (`strict`, `disallow_any_explicit`), pyright (`strict`), ty (warnings are errors). Unused ignore comments are errors. Type checks cover `src/` only. The public API must score 100% on `pyright --verifytypes`: annotate attributes assigned in `__init__`, since inferred types can differ between checkers.
 - Ruff: single quotes, 120-char lines. Tests are exempt from `ANN` rules.
 - Packaging: wheel must declare no `Requires-Dist` and ship `py.typed`; sdist may only contain `src/`, README, LICENSE, pyproject, `PKG-INFO` and `.gitignore`. Never add a runtime dependency — framework imports stay inside `TYPE_CHECKING` or function bodies.
 
