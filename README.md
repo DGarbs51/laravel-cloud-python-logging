@@ -36,21 +36,26 @@ Now add the setup for your framework or server below.
 | Celery | `from laravel_cloud_logging.celery import setup; setup(app)`. Keyword arguments go to `configure()`. |
 | RQ | Call `configure()`. Before or after the worker starts, both work. |
 
-Your server may need one more step:
+Then start your server with the command for it below. The flags in each command keep the server's own lines in JSON or turn them off, so copy them all. `...` stands for your other options, such as the bind address.
 
-| Server | Setup |
-|---|---|
-| Gunicorn | In `gunicorn.conf.py`, set `logconfig_dict = configure()`. Do not set `accesslog`. |
-| Uvicorn | Call `configure()` in the app module. With `--workers` above 1, also start with `--log-config logging.json`. See [Log config file](#log-config-file). |
-| Hypercorn | In `hypercorn.conf.py`, set `logconfig_dict = configure()`. Start with `hypercorn -c file:hypercorn.conf.py ...`. |
-| Granian | Call `configure()` in the app module. Start with `--log-config logging.json`. See [Log config file](#log-config-file). |
-| Waitress | Call `configure()` in the app module. |
-| Daphne | Call `configure()` in `asgi.py`. Start with `daphne -v 0 ...` to turn off its plain-text access log. |
-| uWSGI / pyuwsgi | Call `configure()` in the app module. Add `--disable-logging` to turn off its plain-text access log. Add `--die-on-term`, because uWSGI 2.0 reloads on `SIGTERM` instead of stopping. |
+| Server | Setup | Start command |
+|---|---|---|
+| Gunicorn | In `gunicorn.conf.py`, set `logconfig_dict = configure()`. Do not set `accesslog`. | `gunicorn -c gunicorn.conf.py ... app:app` |
+| Uvicorn | Call `configure()` in the app module. Build `logging.json`: see [Log config file](#log-config-file). | `uvicorn --log-config logging.json ... app:app` |
+| Hypercorn | Call `configure()` in the app module. Build `logging.json`: see [Log config file](#log-config-file). | `hypercorn --log-config json:logging.json ... app:app` |
+| Granian | Call `configure()` in the app module. Build `logging.json`: see [Log config file](#log-config-file). | `granian --log-config logging.json ... app:app` |
+| Waitress | Call `configure()` in the app module. | `waitress-serve ... app:app` |
+| Daphne | Call `configure()` in `asgi.py`. | `daphne -v 0 ... project.asgi:application` |
+| uWSGI / pyuwsgi | Call `configure()` in the app module. | `uwsgi --disable-logging --die-on-term ... --module app:app` |
+
+- Hypercorn needs the `json:` prefix. Without it, Hypercorn reads the file as an INI config.
+- Daphne writes its access log straight to stdout, outside Python's `logging`, so the library can't turn it off. `-v 0` does.
+- uWSGI: `--disable-logging` turns off its plain-text access log. `--die-on-term` makes it stop on `SIGTERM`; uWSGI 2.0 reloads instead.
+- Hypercorn can also take the config in Python: set `logconfig_dict = configure()` in `hypercorn.conf.py` and start with `hypercorn -c file:hypercorn.conf.py ...`.
 
 ### Log config file
 
-The main process of Uvicorn (with several workers) and Granian never imports your app, so `configure()` does not run there. Its boot, worker and shutdown lines would be plain text. Both servers read a JSON logging config file in the main process. On Laravel Cloud, add this to your environment's build commands, after your dependencies install:
+Uvicorn, Hypercorn and Granian can log from their main process before `configure()` runs, and with several workers it never runs there. Those boot, worker and shutdown lines would be plain text. All three servers read a JSON logging config file in the main process. On Laravel Cloud, add this to your environment's build commands, after your dependencies install:
 
 ```sh
 laravel-cloud-logging-config logging.json
@@ -59,7 +64,8 @@ laravel-cloud-logging-config logging.json
 The file is then part of the image every replica starts from. If the command isn't on your `PATH`, run `python -m laravel_cloud_logging.config logging.json` instead. Then start the server with the file:
 
 ```sh
-uvicorn app:app --workers 4 --log-config logging.json ...
+uvicorn --workers 4 --log-config logging.json ... app:app
+hypercorn --workers 4 --log-config json:logging.json ... app:app
 granian --interface asgi --workers 4 --log-config logging.json ... app:app
 ```
 
