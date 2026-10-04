@@ -515,11 +515,26 @@ def configure(
 
     Repeat calls are safe. Unknown level names fall back to INFO; numeric levels
     work too. Uncaught main/thread exceptions are logged unless exceptions=False;
-    interrupts and exits are left alone.
+    interrupts and exits are left alone. The dict is JSON-serializable, so it also
+    works as a --log-config file (python -m laravel_cloud_logging.config).
     """
     for number, _, name in _LEVELS:  # only NOTICE, ALERT and EMERGENCY are unnamed by default
         if logging.getLevelName(number) == f'Level {number}':
             logging.addLevelName(number, name)
+    config = _config(level, access_logs=access_logs)
+    logging.config.dictConfig(config)
+    logging.captureWarnings(True)
+    if exceptions:
+        sys.excepthook = _uncaught
+        # exc_value is only None when the hook is called by hand; both logging and sys.__excepthook__ accept that.
+        threading.excepthook = lambda args: _uncaught(
+            args.exc_type, cast('BaseException', args.exc_value), args.exc_traceback
+        )
+    return config
+
+
+def _config(level: int | str | None = None, *, access_logs: bool = False) -> dict[str, object]:
+    """configure()'s dictConfig dict, without applying it."""
     level = os.environ.get('LOG_LEVEL', 'INFO') if level is None else level
     if isinstance(level, str):
         if sys.version_info >= (3, 11):
@@ -538,23 +553,15 @@ def configure(
     choice = os.environ.get('LOG_FORMAT', '').lower()
     lines = choice == 'line' or (choice != 'json' and _tty(sys.__stdout__))
     formatter = LineFormatter if lines and os.environ.get('LARAVEL_CLOUD') != '1' else MonologFormatter
-    config: dict[str, object] = {
+    # Dotted paths, not classes: dictConfig resolves them, and the dict stays JSON for --log-config files.
+    return {
         'version': 1,
         'disable_existing_loggers': False,
-        'formatters': {'monolog': {'()': formatter}},
-        'handlers': {'cloud': {'()': CloudHandler, 'formatter': 'monolog'}},
+        'formatters': {'monolog': {'()': f'{__name__}.{formatter.__name__}'}},
+        'handlers': {'cloud': {'()': f'{__name__}.{CloudHandler.__name__}', 'formatter': 'monolog'}},
         'root': {'handlers': ['cloud'], 'level': level},
         'loggers': loggers,
     }
-    logging.config.dictConfig(config)
-    logging.captureWarnings(True)
-    if exceptions:
-        sys.excepthook = _uncaught
-        # exc_value is only None when the hook is called by hand; both logging and sys.__excepthook__ accept that.
-        threading.excepthook = lambda args: _uncaught(
-            args.exc_type, cast('BaseException', args.exc_value), args.exc_traceback
-        )
-    return config
 
 
 def wsgi_middleware(app: WSGIApplication) -> WSGIApplication:
