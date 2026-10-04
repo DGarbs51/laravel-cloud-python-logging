@@ -33,12 +33,29 @@ uv lock --upgrade-package <pkg>           # bump one
 
 Edit `pyproject.toml` directly only for settings no `uv` command manages (tool config such as ruff, mypy, coverage).
 
+- Run everything through `uv run`. Never use `pip`, `uv pip install` or an activated venv: they change the env without the lockfile, and the next sync undoes it.
+- Use `--locked`, never `--frozen`: `--frozen` skips the lockfile check and hides drift. `uv version --bump --frozen` leaves `uv.lock` stale.
+- Test one other Python without touching `.venv`: `uv run --isolated --python 3.12 --no-dev --group test pytest -q`.
+- One-off tool: `uv run --with <pkg> ...`. Don't use `uvx` for ruff or the type checkers; the lockfile pins their versions.
+- Ruff: run `check --fix` before `format`. Review `ruff check --diff --unsafe-fixes` before applying unsafe fixes. Explain a rule with `uv run ruff rule <CODE>`; ty rules with `uv run ty explain rule <name>`.
+
 ## Gates (enforced in CI, mirrored by `scripts/check.py`)
 
 - 100% line **and** branch coverage, combined across all Python versions. A single-version local run can show version-specific branches (e.g. `sys.version_info` checks) as missed; use `scripts/check.py` for the real number.
 - Strict typing in three checkers: mypy (`strict`, `disallow_any_explicit`), pyright (`strict`), ty (warnings are errors). Unused ignore comments are errors. Type checks cover `src/` only. The public API must score 100% on `pyright --verifytypes`: annotate attributes assigned in `__init__`, since inferred types can differ between checkers.
-- Ruff: single quotes, 120-char lines. Tests are exempt from `ANN` rules.
+- Ruff: rule selection, single quotes and 120-char lines are in `pyproject.toml`. Tests are exempt from `ANN` rules.
 - Packaging: wheel must declare no `Requires-Dist` and ship `py.typed`; sdist may only contain `src/`, README, LICENSE, pyproject, `PKG-INFO` and `.gitignore`. Never add a runtime dependency — framework imports stay inside `TYPE_CHECKING` or function bodies.
+
+## Type-checker suppressions
+
+Fix the type before suppressing it. Every suppression needs a rule code (ruff `PGH003`, mypy `ignore-without-code`), and unused ones are errors in all three checkers. Pyright treats any `# type: ignore[...]` as a blanket ignore for the line; mypy ignores `# pyright:` and `# ty:` comments; ty ignores `# type: ignore[<mypy-code>]`.
+
+| Checkers that error | Comment |
+|---|---|
+| pyright only | `# pyright: ignore[<rule>]` |
+| ty only | `# ty: ignore[<rule>]` |
+| all three | `# type: ignore[<mypy-code>]  # ty: ignore[<ty-rule>]` (no pyright comment: pyright flags it as unnecessary) |
+| mypy only | Restructure the code. A `# type: ignore` here trips pyright's unnecessary-ignore error. |
 
 ## Architecture
 
@@ -58,7 +75,25 @@ Nearly everything lives in `src/laravel_cloud_logging/__init__.py`:
 - `tests/conftest.py` has an autouse fixture that undoes `configure()` side effects (root handlers, excepthooks, captured warnings, request ID) and sets `LOG_FORMAT=json`, so tests parse JSON even under `pytest -s` in a terminal. New global side effects in `configure()` need matching cleanup there.
 - `tests/helpers.py`: `Collector` is a Unix-socket stand-in for Cloud's log proxy; `captured_stdout()` swaps `sys.__stdout__` (the handler's fallback); `fmt(**kwargs)` formats a record and returns the parsed dict.
 - `tests/test_integrations.py` runs each README framework/server recipe against the real framework (from the `test` dependency group).
+- Tests are flat `def test_<behavior_as_a_sentence>()` functions, no classes. Use `@pytest.mark.parametrize` for tables and local fixtures over new conftest ones.
+- Integration tests skip with `pytest.importorskip(...)` inside the test, not markers. Fork-only tests use `skipif(not hasattr(os, 'fork'))`.
+- Import helpers as `from helpers import ...` (`pythonpath = ["tests"]`).
+- `tests/test_pretty.py` has its own autouse fixture that restores the SIGTERM handler `pretty.main` installs.
 - `scripts/live_check.py` is a manual end-to-end check against a real Laravel Cloud environment (steps in README "Live check").
+
+## Code style
+
+- Public modules start with a module docstring and `from __future__ import annotations`.
+- Private names (modules, constants, helpers, type aliases) take a `_` prefix. Update `__all__` when the public API changes.
+- Comments are short one-line "why" notes. Every `except` or `contextlib.suppress` carries one, since swallowing errors is deliberate here.
+- Framework imports stay in function bodies or under `TYPE_CHECKING` (see Packaging gate).
+
+## Git and PRs
+
+- Branch from `main` as `fix/…`, `feature/…`, `docs/…` or `chore/…`. `main` requires a PR, linear history and the `ci` check; PRs land by squash merge.
+- PR title: imperative sentence case ("Drop uvicorn's color_message extra from log context"). Body: `Closes #N.` when there is an issue, `## Summary` bullets, optional `## Not changed`, `## Test plan` with `uv run --locked scripts/check.py`.
+- A behavior change ships in one PR with its README update, tests and version bump.
+- CI: pin actions to a full commit SHA with a `# vX.Y.Z` comment, keep `persist-credentials: false` and read-only `permissions`. Dependabot bumps actions and uv weekly; don't bump them by hand.
 
 ## Releasing
 

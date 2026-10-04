@@ -62,13 +62,19 @@ def packaging() -> tuple[bool, str]:
     return True, f'{sdist.name.removesuffix(".tar.gz")} wheel + sdist clean'
 
 
+def verifytypes() -> tuple[bool, str]:
+    ok, output = run((*RUN, 'pyright', '--verifytypes', 'laravel_cloud_logging', '--ignoreexternal'))
+    score = re.search(r'Type completeness score: (\S+)', output)
+    return ok, f'{output}\ntype completeness {score[1] if score else "unknown"}'  # last line is the summary
+
+
 GATES: dict[str, Callable[[], tuple[bool, str]]] = {
     'ruff check': partial(run, (*RUN, 'ruff', 'check', '.')),
     'ruff format': partial(run, (*RUN, 'ruff', 'format', '--check', '.')),
     'ty': partial(run, (*RUN, 'ty', 'check')),
     'mypy': partial(run, (*RUN, 'mypy')),
     'pyright': partial(run, (*RUN, 'pyright')),
-    'verifytypes': partial(run, (*RUN, 'pyright', '--verifytypes', 'laravel_cloud_logging', '--ignoreexternal')),
+    'verifytypes': verifytypes,
     'packaging': packaging,
     **{
         f'py{v}': partial(
