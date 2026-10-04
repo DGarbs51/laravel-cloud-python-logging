@@ -147,7 +147,9 @@ Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exc
 
 ## Limits
 
-- Output from before `configure()` runs is plain text. This includes interpreter crashes and server boot lines, unless the server reads a [log config file](#log-config-file). uWSGI's own boot lines are always plain text.
+- Output from before `configure()` runs is plain text. This includes interpreter crashes and server boot lines, unless the server reads a [log config file](#log-config-file).
+- uWSGI's own boot, worker and shutdown lines are plain text. uWSGI writes them from C, outside Python's `logging`. Its log encoders can wrap them in JSON, but not cleanly: a few setup lines stay plain, levels come from matching the text, and `datetime` has no fraction of a second. See [#33](https://github.com/DGarbs51/laravel-cloud-python-logging/issues/33) for a tested recipe.
+- If you add `--logger` or `--log-master` to uWSGI, also set `--log-master-bufsize 1048576`. The default 8 KB buffer silently drops longer lines written to stdout or stderr, such as JSON records with exception traces.
 - There is no redaction. Keep secrets out of messages and `extra=` fields.
 - Python's `logging` raises `KeyError` for `extra=` keys that are `LogRecord` attributes, such as `name`, `message` or `module`. Nest them instead: `extra={'order': {'name': name}}`.
 - An `extra=` field named `color_message` is dropped. Uvicorn uses it for an ANSI-colored copy of the message.
