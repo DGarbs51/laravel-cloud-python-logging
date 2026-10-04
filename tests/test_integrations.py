@@ -251,17 +251,20 @@ def test_server_main_process_logs_json_with_log_config_file(tmp_path, server, so
         port = probe.getsockname()[1]
     command = [sys.executable, '-m', server, '--host', '127.0.0.1', '--port', str(port), *args]
     proc = subprocess.Popen(command, cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    started = False
+    for _ in range(300):
+        with contextlib.suppress(OSError):  # not listening yet
+            started = urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=5).read() == b'ok'
+            break
+        time.sleep(0.1)
+    proc.send_signal(signal.SIGTERM)
     try:
-        for _ in range(100):
-            with contextlib.suppress(OSError):  # not listening yet
-                assert urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=5).read() == b'ok'
-                break
-            time.sleep(0.1)
-        else:
-            pytest.fail('server did not start')
-    finally:
-        proc.send_signal(signal.SIGTERM)
         output = proc.communicate(timeout=30)[0]
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        output = proc.communicate()[0]
+        pytest.fail(f'server did not stop:\n{output}')
+    assert started, output
     lines = output.splitlines()
     plain = [line for line in lines if not line.startswith('{')]
     assert plain == []
