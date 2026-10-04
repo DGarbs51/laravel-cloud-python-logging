@@ -133,6 +133,7 @@ Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exc
 - Output from before `configure()` runs is plain text. This includes server boot lines and interpreter crashes. uWSGI's own boot lines are always plain text.
 - There is no redaction. Keep secrets out of messages and `extra=` fields.
 - Python's `logging` raises `KeyError` for `extra=` keys that are `LogRecord` attributes, such as `name`, `message` or `module`. Nest them instead: `extra={'order': {'name': name}}`.
+- An `extra=` field named `color_message` is dropped. Uvicorn uses it for an ANSI-colored copy of the message.
 - Laravel's Exceptions feature is not supported yet.
 
 ## How it works

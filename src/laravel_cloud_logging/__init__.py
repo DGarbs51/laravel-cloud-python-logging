@@ -56,7 +56,8 @@ _LEVELS = (
     (logging.INFO, 200, 'INFO'),
     (0, 100, 'DEBUG'),
 )
-_STANDARD = set(logging.LogRecord('', 0, '', 0, '', (), None).__dict__) | {'message', 'asctime'}
+# color_message: uvicorn's ANSI copy of the message template, a rendering hint for its own formatter.
+_STANDARD = set(logging.LogRecord('', 0, '', 0, '', (), None).__dict__) | {'message', 'asctime', 'color_message'}
 _LOGGERS = (
     'uvicorn',
     'uvicorn.error',
