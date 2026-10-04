@@ -37,7 +37,7 @@ Edit `pyproject.toml` directly only for settings no `uv` command manages (tool c
 - 100% line **and** branch coverage, combined across all Python versions. A single-version local run can show version-specific branches (e.g. `sys.version_info` checks) as missed; use `scripts/check.py` for the real number.
 - Strict typing in three checkers: mypy (`strict`, `disallow_any_explicit`), pyright (`strict`), ty (warnings are errors). Unused ignore comments are errors. Type checks cover `src/` only.
 - Ruff: single quotes, 120-char lines. Tests are exempt from `ANN` rules.
-- Packaging: wheel must declare no `Requires-Dist` and ship `py.typed`; sdist may only contain `src/`, README, LICENSE, pyproject. Never add a runtime dependency — framework imports stay inside `TYPE_CHECKING` or function bodies.
+- Packaging: wheel must declare no `Requires-Dist` and ship `py.typed`; sdist may only contain `src/`, README, LICENSE, pyproject, `PKG-INFO` and `.gitignore`. Never add a runtime dependency — framework imports stay inside `TYPE_CHECKING` or function bodies.
 
 ## Architecture
 
@@ -61,7 +61,7 @@ Nearly everything lives in `src/laravel_cloud_logging/__init__.py`:
 
 ## Releasing
 
-Run `uv version --bump patch` (or `minor`/`major`), merge to `main`; then `gh workflow run publish.yml --ref main` (TestPyPI) and `gh release create v<version> --generate-notes` (PyPI, trusted publishing).
+Run `uv version --bump patch` (or `minor`/`major`), merge to `main`; then `gh workflow run publish.yml --ref main` (TestPyPI) and `gh release create v<version> --generate-notes` (PyPI, trusted publishing). `publish.yml` fails unless the tag equals `v$(uv version --short)`.
 
 <!-- caveman-begin -->
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
