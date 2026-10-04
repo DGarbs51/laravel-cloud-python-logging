@@ -288,7 +288,7 @@ def _exception(exc: BaseException, depth: int = 1, seen: set[int] | None = None)
 class MonologFormatter(logging.Formatter):
     def __init__(self, channel: str | None = None) -> None:
         super().__init__()
-        self.channel = channel or os.environ.get('APP_ENV') or os.environ.get('LARAVEL_CLOUD_ENV_NAME') or 'local'
+        self.channel: str = channel or os.environ.get('APP_ENV') or os.environ.get('LARAVEL_CLOUD_ENV_NAME') or 'local'
 
     def format(self, record: logging.LogRecord) -> str:
         try:
@@ -361,7 +361,7 @@ class LineFormatter(MonologFormatter):
 
     def __init__(self, channel: str | None = None, color: bool | None = None) -> None:
         super().__init__(channel)
-        self.color = _color(sys.__stdout__) if color is None else color
+        self.color: bool = _color(sys.__stdout__) if color is None else color
 
     def format(self, record: logging.LogRecord) -> str:
         try:
@@ -444,7 +444,7 @@ class CloudHandler(logging.Handler):
         self.address = address
         self.sock: socket.socket | None = None
         self.pid: int | None = None
-        self.retry_at = 0.0
+        self.retry_at: float = 0.0
 
     def _connect(self) -> socket.socket | None:
         if self.pid != os.getpid():  # a forked worker must not share the parent's connection

@@ -42,6 +42,7 @@ jobs:
       - run: uv run ty check
       - run: uv run mypy
       - run: uv run pyright
+      - run: uv run pyright --verifytypes laravel_cloud_logging --ignoreexternal
 
   test:
     runs-on: ubuntu-latest
