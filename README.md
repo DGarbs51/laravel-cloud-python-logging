@@ -169,7 +169,7 @@ Run the check on a shared (Flex) environment and on a private one.
 
 Publishing uses PyPI trusted publishing. See `.github/workflows/publish.yml`.
 
-1. Set `version` in `pyproject.toml`, run `uv lock`, and merge to `main`.
+1. Run `uv version --bump patch` (or `minor`/`major`) and merge to `main`.
 2. TestPyPI: `gh workflow run publish.yml --ref main`.
 3. PyPI: `gh release create v<version> --generate-notes`.
 
