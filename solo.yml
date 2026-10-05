@@ -3,43 +3,37 @@ name: laravel-cloud-python-logging
 icon: null
 processes:
   1 - update uv:
-    command: uv self update
-    working_dir: /Users/dgarbs51/code/laravel-cloud-python-logging
+    command: if brew list uv >/dev/null 2>&1; then brew update && brew upgrade uv; else uv self update; fi
     auto_start: false
     auto_restart: false
     restart_when_changed: []
     env: {}
   2 - update pythons:
     command: uv run --no-project scripts/update_pythons.py
-    working_dir: /Users/dgarbs51/code/laravel-cloud-python-logging
     auto_start: false
     auto_restart: false
     restart_when_changed: []
     env: {}
   3 - update deps:
     command: uv lock --upgrade
-    working_dir: /Users/dgarbs51/code/laravel-cloud-python-logging
     auto_start: false
     auto_restart: false
     restart_when_changed: []
     env: {}
   4 - uv sync:
     command: uv sync
-    working_dir: /Users/dgarbs51/code/laravel-cloud-python-logging
     auto_start: false
     auto_restart: false
     restart_when_changed: []
     env: {}
   5 - fix:
     command: uv run ruff check --fix . && uv run ruff format .
-    working_dir: /Users/dgarbs51/code/laravel-cloud-python-logging
     auto_start: false
     auto_restart: false
     restart_when_changed: []
     env: {}
   6 - check:
     command: uv run --locked scripts/check.py
-    working_dir: /Users/dgarbs51/code/laravel-cloud-python-logging
     auto_start: false
     auto_restart: false
     restart_when_changed: []
