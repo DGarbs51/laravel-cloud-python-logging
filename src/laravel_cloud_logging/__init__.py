@@ -30,7 +30,7 @@ import time
 import traceback
 from array import array
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, MutableMapping
 from datetime import datetime, timezone
 from itertools import islice
 from types import TracebackType
@@ -84,6 +84,10 @@ _OVER = 'Over normalization budget, aborting normalization'
 # A lone surrogate (from os.fsdecode, say) can't be UTF-8; inside a JSON string it becomes the valid escape \udXXX.
 _ESCAPE = 'backslashreplace'
 _RETRY = 5  # seconds on stdout before trying the socket again
+# Set on an exception the middleware has logged, so the handler drops the server's second copy of it.
+_LOGGED = '__laravel_cloud_logged__'
+_GRANIAN_ERROR = 'Application callable raised an exception'  # Granian logs this from Rust, traceback as text
+_FRAME = f'{os.sep}laravel_cloud_logging{os.sep}__init__.py", line '  # this module in a formatted traceback
 _dumps = functools.partial(json.dumps, ensure_ascii=False, separators=(',', ':'))
 
 __all__ = [
@@ -445,6 +449,7 @@ class CloudHandler(logging.Handler):
         self.sock: socket.socket | None = None
         self.pid: int | None = None
         self.retry_at: float = 0.0
+        self.addFilter(_not_logged)
 
     def _connect(self) -> socket.socket | None:
         if self.pid != os.getpid():  # a forked worker must not share the parent's connection
@@ -508,6 +513,28 @@ def _uncaught(kind: type[BaseException], value: BaseException, tb: TracebackType
         logging.getLogger('uncaught').critical('Uncaught exception', exc_info=(kind, value, tb))
 
 
+def _not_logged(record: logging.LogRecord) -> bool:
+    """False for a server's copy of an exception the middleware already logged with the request ID."""
+    if record.exc_info and getattr(record.exc_info[1], _LOGGED, False):
+        return False
+    # Granian passes no exc_info, only the formatted traceback; a middleware frame in it means we logged it.
+    # ponytail: a middleware frame is also there for a BaseException we let through (cancellation); match the
+    # exception's last line too if that ever drops a real error.
+    message = record.msg if isinstance(record.msg, str) else ''
+    return not (record.name.startswith('_granian') and message.startswith(_GRANIAN_ERROR) and _FRAME in message)
+
+
+def _log_request_exception(exc: Exception, request_id: str | None, method: object, path: object) -> None:
+    """Log an exception escaping the app once, with its request ID, before the server logs it without one."""
+    token = cloud_request_id.set(request_id)
+    try:
+        logging.getLogger('uncaught').error('Uncaught exception in %s %s', method, path, exc_info=exc)
+    finally:
+        cloud_request_id.reset(token)
+    with contextlib.suppress(Exception):  # an exception type that refuses new attributes just gets logged twice
+        setattr(exc, _LOGGED, True)
+
+
 def configure(
     level: int | str | None = None, *, exceptions: bool = True, access_logs: bool = False
 ) -> dict[str, object]:
@@ -564,13 +591,45 @@ def _config(level: int | str | None = None, *, access_logs: bool = False, tty: b
     }
 
 
+class _Body:
+    """A streamed WSGI body that logs an exception raised while the server iterates it."""
+
+    def __init__(self, body: Iterable[bytes], request_id: str | None, method: object, path: object) -> None:
+        self.body = body
+        self.request = (request_id, method, path)
+
+    def __iter__(self) -> Iterator[bytes]:
+        try:
+            yield from self.body
+        except Exception as exc:
+            _log_request_exception(exc, *self.request)
+            raise
+
+    def close(self) -> None:
+        close = getattr(self.body, 'close', None)
+        if callable(close):
+            close()
+
+
 def wsgi_middleware(app: WSGIApplication) -> WSGIApplication:
     """Bind the platform's Cloud-Request-ID (clients cannot set it) for each request."""
 
     def wrapped(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         # Set on every request (None when absent), so a reused worker thread never keeps a stale ID.
-        cloud_request_id.set(_header_id(environ.get('HTTP_CLOUD_REQUEST_ID')))
-        return app(environ, start_response)
+        request_id = _header_id(environ.get('HTTP_CLOUD_REQUEST_ID'))
+        cloud_request_id.set(request_id)
+        method, path = environ.get('REQUEST_METHOD'), environ.get('PATH_INFO')
+        try:
+            body = app(environ, start_response)
+        except Exception as exc:
+            _log_request_exception(exc, request_id, method, path)
+            raise
+        file_wrapper = environ.get('wsgi.file_wrapper')
+        # Lists can't fail mid-body, and wrapping them or a file wrapper would cost the server its
+        # Content-Length and sendfile shortcuts.
+        if isinstance(body, (list, tuple)) or (isinstance(file_wrapper, type) and isinstance(body, file_wrapper)):
+            return body
+        return _Body(body, request_id, method, path)
 
     return wrapped
 
@@ -585,9 +644,13 @@ def asgi_middleware(app: _ASGIApp) -> _ASGIApp:
             return await app(scope, receive, send)
         headers = cast('Iterable[tuple[bytes, bytes]]', scope.get('headers') or [])  # ASGI spec: (name, value) bytes
         raw = next((v for k, v in headers if k.lower() == b'cloud-request-id'), b'')
-        token = cloud_request_id.set(_header_id(raw.decode('latin-1')))
+        request_id = _header_id(raw.decode('latin-1'))
+        token = cloud_request_id.set(request_id)
         try:
             return await app(scope, receive, send)
+        except Exception as exc:
+            _log_request_exception(exc, request_id, scope.get('method', 'WEBSOCKET'), scope.get('path'))
+            raise
         finally:
             cloud_request_id.reset(token)
 

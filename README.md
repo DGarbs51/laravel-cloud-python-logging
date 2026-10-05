@@ -51,6 +51,7 @@ Then start your server with the command for it below. The flags in each command 
 - Hypercorn needs the `json:` prefix. Without it, Hypercorn reads the file as an INI config.
 - Daphne writes its access log straight to stdout, outside Python's `logging`, so the library can't turn it off. `-v 0` does.
 - uWSGI: `--disable-logging` turns off its plain-text access log. `--die-on-term` makes it stop on `SIGTERM`; uWSGI 2.0 reloads instead.
+- uWSGI closes the connection without a response when an exception escapes your WSGI app, so Cloud's nginx answers 502 instead of 500. The exception is still logged. Use a framework that turns exceptions into a 500 response (Flask and Django do), or catch them in your app.
 - Hypercorn can also take the config in Python: set `logconfig_dict = configure()` in `hypercorn.conf.py` and start with `hypercorn -c file:hypercorn.conf.py ...`.
 
 ### Log config file
@@ -150,6 +151,10 @@ The `NOTICE`, `ALERT` and `EMERGENCY` constants are exported: `logger.log(larave
 ## Exceptions
 
 Log with `logger.exception(...)` or `exc_info=True`. The dashboard shows the exception with its class, message, file, trace and the full `previous` chain (`raise ... from ...`).
+
+An exception that escapes your app is logged once by the middleware, as `Uncaught exception in GET /path` at `ERROR`, with `context.cloud_request_id`. That includes exceptions raised while a response streams. The server still answers as before, usually with a 500. Every server also logs the exception itself, often without the request ID, and Granian logs it as plain text. The handler drops those second copies. Without the middleware, you get the server's own record.
+
+Frameworks such as Django, Flask and FastAPI catch most exceptions themselves and log them through `logging`, so the middleware only sees what they let through.
 
 ## Limits
 

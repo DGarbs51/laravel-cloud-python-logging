@@ -9,21 +9,15 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
-from unittest.mock import patch
+from pathlib import Path
 
 import pytest
-from helpers import captured_stdout
+from helpers import lines_after
 
 import laravel_cloud_logging as lcl
 from laravel_cloud_logging import CloudHandler, configure
-
-
-def lines_after(action):
-    with patch.dict(os.environ, {'LARAVEL_CLOUD': ''}), captured_stdout() as stdout:
-        action()
-        sys.__stdout__.flush()
-        return stdout()
 
 
 def only_cloud_handler():
@@ -208,6 +202,8 @@ configure()
 async def _app(scope, receive, send):
     if scope['type'] != 'http':
         return
+    if scope['path'] == '/boom':
+        raise RuntimeError('boom')
     await send({'type': 'http.response.start', 'status': 200, 'headers': []})
     await send({'type': 'http.response.body', 'body': b'ok'})
 
@@ -221,33 +217,44 @@ configure()
 
 
 def _app(environ, start_response):
+    if environ['PATH_INFO'] == '/boom':
+        raise RuntimeError('boom')
     start_response('200 OK', [])
     return [b'ok']
 
 
 app = wsgi_middleware(_app)
 """
+# Each documented start command, with {port} filled in. uWSGI closes the connection on an uncaught exception.
+SERVERS = {
+    'uvicorn': (ASGI_APP, ['--port', '{port}', '--workers', '2', '--log-config', 'logging.json', 'app:app'], 500),
+    'hypercorn': (
+        ASGI_APP,
+        ['--bind', '127.0.0.1:{port}', '--workers', '2', '--log-config', 'json:logging.json', 'app:app'],
+        500,
+    ),
+    'granian': (
+        WSGI_APP,
+        ['--port', '{port}', '--interface', 'wsgi', '--workers', '2', '--log-config', 'logging.json', 'app:app'],
+        500,
+    ),
+    'gunicorn': (WSGI_APP, ['-b', '127.0.0.1:{port}', 'app:app'], 500),
+    'waitress': (WSGI_APP, ['--listen', '127.0.0.1:{port}', 'app:app'], 500),
+    'daphne': (ASGI_APP, ['-v', '0', '-p', '{port}', 'app:app'], 500),
+    'uwsgi': (
+        WSGI_APP,
+        [
+            *('--http-socket', '127.0.0.1:{port}', '--module', 'app:app', '--master', '--processes', '2'),
+            *('--enable-threads', '--need-app', '--disable-logging', '--die-on-term'),
+        ],
+        None,
+    ),
+}
 
 
-@pytest.mark.skipif(not hasattr(os, 'fork'), reason='multi-worker servers need fork')
-@pytest.mark.parametrize(
-    ('server', 'source', 'args'),
-    [
-        ('uvicorn', ASGI_APP, ['--port', '{port}', '--workers', '2', '--log-config', 'logging.json', 'app:app']),
-        (
-            'hypercorn',
-            ASGI_APP,
-            ['--bind', '127.0.0.1:{port}', '--workers', '2', '--log-config', 'json:logging.json', 'app:app'],
-        ),
-        (
-            'granian',
-            WSGI_APP,
-            ['--port', '{port}', '--interface', 'wsgi', '--workers', '2', '--log-config', 'logging.json', 'app:app'],
-        ),
-    ],
-)
-def test_server_main_process_logs_json_with_log_config_file(tmp_path, server, source, args):
-    pytest.importorskip(server)
+def serve(tmp_path, server, path='/'):
+    """Boot a server on the documented command, GET path with a Cloud-Request-ID, SIGTERM; (status, records)."""
+    source, args, _ = SERVERS[server]
     (tmp_path / 'app.py').write_text(source)
     env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'PYTHONUNBUFFERED': '1'}
     env.pop('LARAVEL_CLOUD', None)
@@ -257,14 +264,23 @@ def test_server_main_process_logs_json_with_log_config_file(tmp_path, server, so
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
-    command = [sys.executable, '-m', server, *(arg.format(port=port) for arg in args)]
+    # pyuwsgi only ships a console script, next to this interpreter.
+    launcher = [str(Path(sys.executable).with_name('uwsgi'))] if server == 'uwsgi' else [sys.executable, '-m', server]
+    command = [*launcher, *(a.format(port=port) for a in args)]
     proc = subprocess.Popen(command, cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    started = False
+    status = None
     for _ in range(300):
         with contextlib.suppress(OSError):  # not listening yet
-            started = urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=5).read() == b'ok'
+            urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=5).read()
             break
         time.sleep(0.1)
+    with contextlib.suppress(OSError):  # uWSGI drops the connection on an uncaught exception
+        request = urllib.request.Request(f'http://127.0.0.1:{port}{path}', headers={'Cloud-Request-ID': 'req-1'})
+        try:
+            status = urllib.request.urlopen(request, timeout=10).status
+        except urllib.error.HTTPError as error:
+            status = error.code
+    time.sleep(0.5)  # let the worker finish logging before shutdown
     proc.send_signal(signal.SIGTERM)
     try:
         output = proc.communicate(timeout=30)[0]
@@ -272,11 +288,33 @@ def test_server_main_process_logs_json_with_log_config_file(tmp_path, server, so
         proc.kill()
         output = proc.communicate()[0]
         pytest.fail(f'server did not stop:\n{output}')
-    assert started, output
+    return status, output
+
+
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason='multi-worker servers need fork')
+@pytest.mark.parametrize('server', ['uvicorn', 'hypercorn', 'granian'])
+def test_server_main_process_logs_json_with_log_config_file(tmp_path, server):
+    pytest.importorskip(server)
+    status, output = serve(tmp_path, server)
+    assert status == 200, output
     lines = output.splitlines()
-    plain = [line for line in lines if not line.startswith('{')]
-    assert plain == []
+    assert [line for line in lines if not line.startswith('{')] == []
     entries = [json.loads(line) for line in lines]
     assert entries
     if server == 'granian':  # its thread-count warning keeps its level
         assert any(e['level_name'] == 'WARNING' and e['extra'] == {'logger': '_granian'} for e in entries)
+
+
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason='multi-worker servers need fork')
+@pytest.mark.parametrize('server', list(SERVERS))
+def test_uncaught_request_exception_is_one_structured_record_with_the_request_id(tmp_path, server):
+    pytest.importorskip('pyuwsgi' if server == 'uwsgi' else server)
+    status, output = serve(tmp_path, server, '/boom')
+    assert status == SERVERS[server][2], output
+    records = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+    errors = [r for r in records if 'boom' in json.dumps(r)]
+    assert len(errors) == 1, output
+    assert errors[0]['message'] == 'Uncaught exception in GET /boom'
+    assert errors[0]['level_name'] == 'ERROR'
+    assert errors[0]['context']['cloud_request_id'] == 'req-1'
+    assert errors[0]['context']['exception']['class'] == 'RuntimeError'

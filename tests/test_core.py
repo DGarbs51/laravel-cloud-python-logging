@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
-from helpers import KEYS, Broken, Collector, captured_stdout, fmt
+from helpers import KEYS, Broken, Collector, captured_stdout, fmt, lines_after
 
 import laravel_cloud_logging as lcl
 from laravel_cloud_logging import CloudHandler, MonologFormatter, configure
@@ -696,6 +696,107 @@ def test_asgi_middleware():
 
     asyncio.run(run())
     assert seen == ['def', None, 'ws', None, 'outer']
+
+
+def test_middleware_logs_uncaught_exceptions_once_with_the_request_id():
+    async def asgi_app(scope, receive, send):
+        raise RuntimeError('asgi boom')
+
+    def wsgi_app(environ, start_response):
+        raise RuntimeError('wsgi boom')
+
+    def server_logs(exc):  # what uvicorn, gunicorn and the others do after the middleware re-raises
+        logging.getLogger('uvicorn.error').error('Exception in ASGI application', exc_info=exc)
+
+    def run():
+        configure(exceptions=False)
+        with pytest.raises(RuntimeError) as asgi:
+            asyncio.run(
+                lcl.asgi_middleware(asgi_app)(
+                    {'type': 'http', 'method': 'GET', 'path': '/a', 'headers': [(b'cloud-request-id', b'r-1')]},
+                    None,
+                    None,
+                )
+            )
+        server_logs(asgi.value)
+        with pytest.raises(RuntimeError) as wsgi:
+            lcl.wsgi_middleware(wsgi_app)({'REQUEST_METHOD': 'POST', 'PATH_INFO': '/w'}, None)
+        server_logs(wsgi.value)
+        with pytest.raises(RuntimeError):  # nested middleware: the outer copy is dropped too
+            asyncio.run(
+                lcl.asgi_middleware(lcl.asgi_middleware(asgi_app))(
+                    {'type': 'websocket', 'path': '/ws', 'headers': []}, None, None
+                )
+            )
+
+    entries = lines_after(run)
+    assert [(e['message'], e['context'].get('cloud_request_id')) for e in entries] == [
+        ('Uncaught exception in GET /a', 'r-1'),
+        ('Uncaught exception in POST /w', None),
+        ('Uncaught exception in WEBSOCKET /ws', None),
+    ]
+    assert all(e['context']['exception']['class'] == 'RuntimeError' for e in entries)
+
+
+def test_wsgi_middleware_logs_an_exception_while_streaming_the_body():
+    closed = []
+
+    class Stream:
+        def __iter__(self):
+            yield b'part'
+            raise RuntimeError('mid-body')
+
+        def close(self):
+            closed.append(True)
+
+    def run():
+        configure(exceptions=False)
+        body = lcl.wsgi_middleware(lambda environ, start_response: Stream())(
+            {'HTTP_CLOUD_REQUEST_ID': 's-1', 'REQUEST_METHOD': 'GET', 'PATH_INFO': '/s'}, None
+        )
+        lcl.cloud_request_id.set('next-request')  # the server may iterate after the ID moved on
+        with pytest.raises(RuntimeError):
+            list(body)
+        body.close()
+        lcl.wsgi_middleware(lambda environ, start_response: iter([b'ok']))({}, None).close()  # no close(): fine
+
+    [entry] = lines_after(run)
+    assert entry['message'] == 'Uncaught exception in GET /s'
+    assert entry['context']['cloud_request_id'] == 's-1'
+    assert closed == [True]
+
+
+def test_wsgi_middleware_returns_lists_and_file_wrappers_unwrapped():
+    class FileWrapper:
+        def __init__(self, f):
+            self.f = f
+
+    def app(environ, start_response):
+        return environ['wsgi.file_wrapper'](None) if 'wsgi.file_wrapper' in environ else [b'ok']
+
+    wrapped = lcl.wsgi_middleware(app)
+    assert wrapped({}, None) == [b'ok']
+    assert isinstance(wrapped({'wsgi.file_wrapper': FileWrapper}, None), FileWrapper)
+    assert type(wrapped({'wsgi.file_wrapper': lambda f: iter(())}, None)) is lcl._Body  # a function, not a type
+
+
+def test_handler_drops_granian_text_copies_only_when_the_middleware_saw_the_exception():
+    def granian_text(frames):
+        return logging.LogRecord('_granian.utils', logging.ERROR, '', 0, f'{lcl._GRANIAN_ERROR}\n{frames}', (), None)
+
+    ours = f'Traceback ...\n  File "{lcl.__file__}", line 9, in wrapped'
+    assert lcl._not_logged(granian_text(ours)) is False
+    assert lcl._not_logged(granian_text('Traceback ...\n  File "/app/app.py", line 3')) is True  # no middleware
+    assert lcl._not_logged(logging.LogRecord('_granian', logging.ERROR, '', 0, 42, (), None)) is True
+
+    class Frozen(Exception):
+        def __setattr__(self, name, value):
+            raise AttributeError(name)
+
+    with captured_stdout():  # an exception that refuses the mark is logged again by the server, not lost
+        configure(exceptions=False)
+        lcl._log_request_exception(Frozen(), None, 'GET', '/')
+    assert not hasattr(Frozen(), lcl._LOGGED)
 
 
 def test_review_regressions_in_formatter():
