@@ -2,7 +2,7 @@
 
 Make your Python app's logs look like a Laravel app's logs in the Laravel Cloud dashboard. You get real levels, structured context, request IDs and full exception chains, without plain-text noise.
 
-No runtime dependencies. Python 3.10 to 3.15.
+No runtime dependencies. Python 3.11 to 3.15.
 
 ## Quick start
 
@@ -81,6 +81,21 @@ configure(level=None, *, exceptions=True, access_logs=False)
 - `level`: a name (`"debug"`, `"notice"`) or a number. Default: the `LOG_LEVEL` environment variable, then `INFO`. An unknown name also falls back to `INFO`.
 - `exceptions=False`: do not log uncaught exceptions.
 - `access_logs=True`: keep your server's access logs. They are off by default, because Cloud already logs every request.
+
+### Exiting with `os._exit`
+
+Log lines are written by a background thread. A normal exit writes the queued lines first, but `os._exit()` skips that step. Call `flush()` before it:
+
+```python
+import os
+
+from laravel_cloud_logging import flush
+
+flush(0.5)
+os._exit(1)
+```
+
+`flush(timeout=1.0)` waits until the lines queued before the call are written, or until the timeout passes. It returns `True` if every line was written. It takes no locks, so you can call it in a signal handler. `multiprocessing` children also end with `os._exit`: call `flush()` at the end of the target function. The Celery integration already does this for prefork pool children.
 
 ## Local development
 
@@ -171,6 +186,7 @@ Frameworks such as Django, Flask and FastAPI catch most exceptions themselves an
 Each record is one JSON line with the keys `message`, `context`, `level`, `level_name`, `channel`, `datetime` and `extra`. Your `extra=` fields always go inside `context`. The package never adds other top-level keys, because Cloud uses top-level keys to choose how to parse a line.
 
 - **Transport:** On Cloud (`LARAVEL_CLOUD=1`), lines go to the log socket (`LARAVEL_CLOUD_LOG_SOCKET`, default `unix:///tmp/cloud-init.sock`). Every process in a container shares one stdout pipe, so large lines from several processes can mix together. The socket keeps each line whole. If the socket fails, or you are not on Cloud, lines go to stdout. The format is chosen from `LARAVEL_CLOUD`, not from the transport, so the stdout fallback on Cloud is still JSON.
+- **Background writer:** The handler formats each record on the thread that logs it, then queues the line. A background thread writes queued lines, so a slow socket or stdout never blocks your event loop. Each process (and each child after a fork) has its own writer, so lines from one process stay in order. The queue holds `LARAVEL_CLOUD_LOG_QUEUE` lines (default 10,000). When it is full, new lines are dropped. When the queue empties again, one `WARNING` record says how many were dropped, with the count in `context.dropped`. On exit, the handler waits up to 1 second for queued lines. Set `LARAVEL_CLOUD_LOG_SYNC=1` to write each line on the thread that logs it instead.
 - **Size cap:** Each line is at most 256 KiB. Long messages and traces are cut first, then extra context. Cloud turns records over 1 MB into plain text, so this cap keeps large records structured.
 - **Normalization:** Like Monolog, context stops at 9 levels deep and 1,000 items per container. Each record also has a budget of 10,000 values and about 1M characters, so shared or cyclic references cannot fan out. Values past the budget become `Over normalization budget, aborting normalization`. `cloud_request_id`, `exception` and `stack` sit outside the budget, so only the size cap can drop them. Exception messages built from containers or bytes use a bounded repr: 30 items per container, 3 levels, 1,000 characters per value and 256K characters in total. The formatter cannot bound memory used by your own `__str__` methods or `%`-format arguments.
 - **Channel:** `APP_ENV`, then `LARAVEL_CLOUD_ENV_NAME`, then `local`.
@@ -184,7 +200,7 @@ uv run ty check && uv run mypy && uv run pyright
 uv run coverage run -m pytest -q && uv run coverage combine && uv run coverage report
 ```
 
-CI runs the tests on Python 3.10 to 3.15 and requires 100% line and branch coverage across all versions combined. One local run can show version-specific branches as missed.
+CI runs the tests on Python 3.11 to 3.15 and requires 100% line and branch coverage across all versions combined. One local run can show version-specific branches as missed.
 
 ### Live check on Laravel Cloud
 

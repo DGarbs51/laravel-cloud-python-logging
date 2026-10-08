@@ -10,10 +10,11 @@ import runpy
 import socket
 import sys
 import threading
+import time
 import tracemalloc
 import warnings
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -95,7 +96,7 @@ def test_normalization():
         obj=object(),
         bad=Unprintable(),
         nested={'a': {'b': (1, 2)}},
-        when=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        when=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
     )
     assert entry['message'] == 'multi\nline 雪'
     assert entry['context']['when'] == '2026-01-02T03:04:05+00:00'
@@ -503,7 +504,8 @@ def test_fork_reconnects(collector):
         if pid == 0:
             handler = logging.getLogger().handlers[0]
             logging.info('from child')
-            os._exit(0 if handler.sock is not parent_sock and handler.pid == os.getpid() else 1)
+            drained = lcl.flush(5)  # os._exit skips atexit, so nothing else drains the queue
+            os._exit(0 if drained and handler.sock not in (None, parent_sock) and handler.pid == os.getpid() else 1)
         _, status = os.waitpid(pid, 0)
         assert os.waitstatus_to_exitcode(status) == 0
         collector.find('from child')
@@ -536,6 +538,7 @@ def test_fallback_to_stdout_after_socket_loss_and_retry_delay(collector):
         handler.sock.close()
         logging.error('after socket loss')
         logging.warning('during retry delay')
+        assert lcl.flush(5)
         assert handler.sock is None
         assert handler.retry_at > 0
         sys.__stdout__.flush()
@@ -952,6 +955,7 @@ def test_reconnects_after_retry_delay(collector):
     with patch('laravel_cloud_logging.time.monotonic', lambda: clock[0]), captured_stdout() as stdout:
         handler.retry_at = 1004.0  # as if a failure happened 1 s ago
         handler.handle(record('waiting'))
+        assert lcl.flush(5)
         assert handler.sock is None
         clock[0] = 1005.0
         handler.handle(record('reconnected'))
@@ -960,3 +964,138 @@ def test_reconnects_after_retry_delay(collector):
     assert collector.find('reconnected')
     assert handler.sock.gettimeout() == 2.0
     handler.close()
+
+
+def record(msg, level=logging.INFO):
+    return logging.LogRecord('app', level, __file__, 1, msg, (), None)
+
+
+def stdout_handler():
+    handler = CloudHandler(None)
+    handler.address = None  # stdout, even if the tests run on Cloud
+    handler.setFormatter(MonologFormatter())
+    return handler
+
+
+def test_emit_never_blocks_on_a_socket_that_stopped_reading():
+    server = socket.create_server(('127.0.0.1', 0))  # never accepts or reads: the kernel buffers fill up
+    handler = CloudHandler(f'tcp://127.0.0.1:{server.getsockname()[1]}')
+    handler.setFormatter(MonologFormatter())
+    with captured_stdout() as stdout:
+        slowest = 0.0
+        for _ in range(200):
+            start = time.perf_counter()
+            handler.handle(record('x' * 65536))  # 13 MB in all, far past the socket buffers
+            slowest = max(slowest, time.perf_counter() - start)
+        assert slowest < 0.1  # a synchronous send blocks for the 2 s socket timeout
+        assert lcl.flush(0.2) is False  # the writer is stuck in sendall
+        server.close()
+        handler.close()  # gives up after its deadline; the queue empties into stdout
+        assert lcl.flush(10)
+        assert stdout()[-1]['message'] == 'x' * 65536
+
+
+def test_full_queue_drops_lines_and_reports_the_count_once_it_drains(monkeypatch):
+    monkeypatch.setenv('LARAVEL_CLOUD_LOG_QUEUE', '2')
+    entered, release, write = threading.Event(), threading.Event(), lcl._stdout
+
+    def blocked(data):
+        entered.set()
+        release.wait(5)
+        write(data)
+
+    with captured_stdout() as stdout, patch.object(lcl, '_stdout', blocked):
+        handler = stdout_handler()
+        handler.handle(record('first'))
+        assert entered.wait(5)  # the writer holds 'first'; two more fit in the queue
+        for msg in ('second', 'third', 'lost', 'also lost'):
+            handler.handle(record(msg))
+        release.set()
+        assert lcl.flush(5)
+        handler.handle(record('after'))
+        entries = stdout()
+    assert [e['message'] for e in entries] == [
+        'first',
+        'second',
+        'third',
+        'Dropped 2 log lines: the log queue was full',
+        'after',
+    ]
+    assert entries[3]['level_name'] == 'WARNING'
+    assert entries[3]['context'] == {'dropped': 2}
+    assert list(entries[3]) == KEYS
+
+
+@pytest.mark.parametrize(('value', 'size'), [(None, 10_000), ('50', 50), ('0', 1), ('-3', 1), ('lots', 10_000)])
+def test_queue_capacity_comes_from_the_environment(monkeypatch, value, size):
+    if value is None:
+        monkeypatch.delenv('LARAVEL_CLOUD_LOG_QUEUE', raising=False)
+    else:
+        monkeypatch.setenv('LARAVEL_CLOUD_LOG_QUEUE', value)
+    assert CloudHandler(None).queue.maxsize == size
+
+
+def test_sync_mode_writes_on_the_callers_thread(monkeypatch, collector):
+    monkeypatch.setenv('LARAVEL_CLOUD_LOG_SYNC', '1')
+    handler = CloudHandler(collector.address)
+    handler.setFormatter(MonologFormatter())
+    handler.handle(record('sync'))
+    assert handler.writer is None
+    assert handler.sock is not None
+    assert collector.find('sync')
+    handler.close()
+    assert handler.sock is None
+
+
+def test_writer_closes_the_socket_when_the_handler_closes(collector):
+    handler = CloudHandler(collector.address)
+    handler.setFormatter(MonologFormatter())
+    handler.handle(record('queued'))
+    writer = handler.writer
+    handler.close()
+    writer.join(5)
+    assert not writer.is_alive()
+    assert handler.sock is None
+    assert collector.find('queued')
+
+
+def test_after_close_or_during_shutdown_lines_go_to_stdout_right_away(collector):
+    handler = CloudHandler(collector.address)
+    handler.setFormatter(MonologFormatter())
+    with captured_stdout() as stdout:
+        handler.close()
+        handler.handle(record('after close'))
+        assert handler.writer is None
+        handler.closed = False
+        with patch.object(sys, 'is_finalizing', lambda: True):
+            handler.handle(record('finalizing'))
+        assert handler.writer is None
+        with patch.object(threading.Thread, 'start', side_effect=RuntimeError("can't create new thread")):
+            handler.handle(record('no threads'))
+        assert handler.writer is None
+        assert [e['message'] for e in stdout()] == ['after close', 'finalizing', 'no threads']
+    assert collector.lines == []
+
+
+def test_a_forked_handler_starts_its_own_writer_and_queue():
+    with captured_stdout() as stdout:
+        handler = stdout_handler()
+        handler.handle(record('parent'))
+        assert lcl.flush(5)
+        parent_queue, parent_writer = handler.queue, handler.writer
+        handler.pid, handler.queued = -1, 5  # as if forked with lines the parent still had to write
+        assert lcl.flush(0)  # the child doesn't wait for the parent's lines
+        handler.handle(record('child'))
+        assert handler.pid == os.getpid()
+        assert handler.queue is not parent_queue
+        assert handler.writer is not parent_writer
+        assert [e['message'] for e in stdout()] == ['parent', 'child']
+        handler.pid = -1
+        handler.close()  # a child closing its inherited handler leaves the parent's writer alone
+        assert handler.writer is None
+        assert parent_writer.is_alive()
+
+
+def test_flush_never_raises():
+    with patch.object(lcl, '_handlers', [object()]):
+        assert lcl.flush(1) is False

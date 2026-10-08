@@ -19,7 +19,7 @@ from functools import partial
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PYTHONS = ('3.10', '3.11', '3.12', '3.13', '3.14', '3.15')
+PYTHONS = ('3.11', '3.12', '3.13', '3.14', '3.15')
 RUN = ('uv', 'run', '-q', '--locked', '--no-sync')
 # Each version gets a throwaway env with only the test group, like CI; uv's cache keeps this fast.
 TEST = ('uv', 'run', '-q', '--locked', '--isolated', '--no-dev', '--group', 'test')

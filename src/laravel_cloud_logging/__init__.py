@@ -22,16 +22,18 @@ import logging
 import logging.config
 import math
 import os
+import queue
 import reprlib
 import socket
 import sys
 import threading
 import time
 import traceback
+import weakref
 from array import array
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, MutableMapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import islice
 from types import TracebackType
 from typing import IO, TYPE_CHECKING, TypedDict, TypeVar, cast, overload
@@ -84,6 +86,8 @@ _OVER = 'Over normalization budget, aborting normalization'
 # A lone surrogate (from os.fsdecode, say) can't be UTF-8; inside a JSON string it becomes the valid escape \udXXX.
 _ESCAPE = 'backslashreplace'
 _RETRY = 5  # seconds on stdout before trying the socket again
+_QUEUE = 10_000  # lines the writer may fall behind before new ones are dropped (LARAVEL_CLOUD_LOG_QUEUE)
+_CLOSE = 1.0  # seconds close() waits for queued lines
 # Set on an exception the middleware has logged, so the handler drops the server's second copy of it.
 _LOGGED = '__laravel_cloud_logged__'
 _GRANIAN_ERROR = 'Application callable raised an exception'  # Granian logs this from Rust, traceback as text
@@ -100,6 +104,7 @@ __all__ = [
     'asgi_middleware',
     'cloud_request_id',
     'configure',
+    'flush',
     'wsgi_middleware',
 ]
 
@@ -308,7 +313,7 @@ class MonologFormatter(logging.Formatter):
             'level': number,
             'level_name': name,
             'channel': self.channel[:_LINE],
-            'datetime': datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec='microseconds'),
+            'datetime': datetime.fromtimestamp(record.created, UTC).isoformat(timespec='microseconds'),
             'extra': {'logger': record.name[:_LINE]},
         }
 
@@ -438,8 +443,26 @@ def _fits(line: str) -> bool:
     return len(line.encode(errors=_ESCAPE)) < _LINE
 
 
+def _stdout(data: bytes) -> None:
+    with contextlib.suppress(Exception):  # no stdout (None) or a closed one: nowhere left to write
+        out = cast('io.TextIOWrapper', sys.__stdout__).buffer
+        out.write(data)  # one write per line; stdout lines over 4 KiB can interleave between processes
+        out.flush()
+
+
+def _capacity() -> int:
+    with contextlib.suppress(ValueError):  # unset or not a number: the default
+        return max(1, int(os.environ.get('LARAVEL_CLOUD_LOG_QUEUE', '')))  # 0 would make the queue unbounded
+    return _QUEUE
+
+
 class CloudHandler(logging.Handler):
-    """One line per record to the Cloud log socket; stdout when off Cloud or on failure."""
+    """One line per record to the Cloud log socket; stdout when off Cloud or on failure.
+
+    emit() formats on the caller's thread and queues the bytes; a daemon writer thread does the
+    I/O, so a slow socket never blocks an event loop. When the queue is full, lines are dropped
+    and counted. LARAVEL_CLOUD_LOG_SYNC=1 writes on the caller's thread instead.
+    """
 
     def __init__(self, address: str | None = None) -> None:
         super().__init__()
@@ -447,13 +470,27 @@ class CloudHandler(logging.Handler):
             address = os.environ.get('LARAVEL_CLOUD_LOG_SOCKET') or 'unix:///tmp/cloud-init.sock'
         self.address = address
         self.sock: socket.socket | None = None
-        self.pid: int | None = None
+        self.pid: int = os.getpid()
         self.retry_at: float = 0.0
+        self.sync: bool = os.environ.get('LARAVEL_CLOUD_LOG_SYNC') == '1'
+        self.closed: bool = False
+        self.queue: queue.Queue[bytes | None] = queue.Queue(_capacity())
+        self.writer: threading.Thread | None = None
+        # Each counter has one writing thread, so flush() can read them without a lock.
+        self.queued: int = 0
+        self.written: int = 0
+        self.dropped: int = 0
+        self.reported: int = 0
         self.addFilter(_not_logged)
+        _handlers.add(self)
+
+    def _reset(self) -> None:
+        """After fork: the parent's writer thread is gone, its queue lock may be held, its socket is shared."""
+        self.pid, self.sock, self.writer = os.getpid(), None, None
+        self.queue = queue.Queue(self.queue.maxsize)
+        self.queued = self.written = self.dropped = self.reported = 0
 
     def _connect(self) -> socket.socket | None:
-        if self.pid != os.getpid():  # a forked worker must not share the parent's connection
-            self.sock, self.pid = None, os.getpid()
         if self.sock is None and self.address and time.monotonic() >= self.retry_at:
             sock = None
             target: str | tuple[str, int]
@@ -474,13 +511,7 @@ class CloudHandler(logging.Handler):
             self.sock = sock
         return self.sock
 
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            data = (self.format(record) + '\n').encode(errors=_ESCAPE)
-        except Exception:
-            with contextlib.suppress(Exception):  # e.g. sys.stderr closed
-                self.handleError(record)
-            return
+    def _send(self, data: bytes) -> None:
         sock = self._connect()
         if sock is not None:
             try:
@@ -490,20 +521,98 @@ class CloudHandler(logging.Handler):
                 self.sock, self.retry_at = None, time.monotonic() + _RETRY
                 with contextlib.suppress(OSError):
                     sock.close()
-        with contextlib.suppress(Exception):
-            out = cast('io.TextIOWrapper', sys.__stdout__).buffer  # None (no stdout) raises and is ignored
-            out.write(data)  # one write per line; stdout lines over 4 KiB can interleave between processes
-            out.flush()
+        _stdout(data)
+
+    def _write(self) -> None:
+        """The writer thread. Only it touches the socket while it runs."""
+        while (data := self.queue.get()) is not None:
+            self._send(data)
+            if self.dropped != self.reported and self.queue.empty():
+                self._report()
+            self.written += 1  # after the drop report, so flush() waits for it too
+        if self.sock is not None:  # close() queued None
+            self.sock.close()
+            self.sock = None
+
+    def _report(self) -> None:
+        """One JSON record for the lines dropped while the queue was full: stdout must stay JSON."""
+        dropped, count = self.dropped, self.dropped - self.reported
+        message = 'Dropped %d log lines: the log queue was full'
+        record = logging.LogRecord(__name__, logging.WARNING, __file__, 0, message, (count,), None)
+        record.dropped = count
+        self.reported = dropped
+        with contextlib.suppress(Exception):  # a custom formatter that raises
+            self._send((self.format(record) + '\n').encode(errors=_ESCAPE))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            data = (self.format(record) + '\n').encode(errors=_ESCAPE)
+        except Exception:
+            with contextlib.suppress(Exception):  # e.g. sys.stderr closed
+                self.handleError(record)
+            return
+        if self.pid != os.getpid():  # a forked worker must not share the parent's writer or connection
+            self._reset()
+        if self.closed or sys.is_finalizing():  # the writer may be gone
+            _stdout(data)
+        elif self.sync:
+            self._send(data)
+        else:
+            if self.writer is None:
+                writer = threading.Thread(target=self._write, name='laravel-cloud-logging', daemon=True)
+                try:
+                    writer.start()
+                except RuntimeError:  # interpreter shutdown has begun: no new threads
+                    _stdout(data)
+                    return
+                self.writer = writer
+            try:
+                self.queue.put_nowait(data)
+                self.queued += 1
+            except queue.Full:  # the writer is behind: drop rather than block the caller
+                self.dropped += 1
+
+    def _drain(self, deadline: float) -> bool:
+        """Wait for lines already queued. No locks: it may run in a signal handler that interrupted emit()."""
+        target = self.queued
+        while self.written < target and self.pid == os.getpid():  # a child's copies were the parent's to write
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.001)
+        return True
 
     def close(self) -> None:
+        self._drain(time.monotonic() + _CLOSE)
         self.acquire()
         try:
-            if self.sock is not None and self.pid == os.getpid():
+            if self.pid != os.getpid():
+                self._reset()
+            if self.writer is not None:
+                with contextlib.suppress(queue.Full):  # stuck writer: a daemon, it ends with the process
+                    self.queue.put_nowait(None)  # the writer closes the socket and exits
+            elif self.sock is not None:
                 self.sock.close()
-            self.sock = None
+                self.sock = None
+            self.closed = True
         finally:
             self.release()
         super().close()
+
+
+_handlers: weakref.WeakSet[CloudHandler] = weakref.WeakSet()
+
+
+def flush(timeout: float = 1.0) -> bool:
+    """Wait up to timeout seconds for queued lines to be written; True if all were.
+
+    Only lines queued before the call count. Takes no locks, so it is safe in a signal
+    handler. Call it before os._exit(), which skips the atexit hook that drains the queue.
+    """
+    deadline = time.monotonic() + timeout
+    try:
+        return all([handler._drain(deadline) for handler in list(_handlers)])  # pyright: ignore[reportPrivateUsage]
+    except Exception:  # never raise into the app; e.g. a handler created while iterating
+        return False
 
 
 def _uncaught(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
@@ -564,10 +673,7 @@ def _config(level: int | str | None = None, *, access_logs: bool = False, tty: b
     """configure()'s dictConfig dict, without applying it. tty=False ignores whether stdout is a terminal."""
     level = os.environ.get('LOG_LEVEL', 'INFO') if level is None else level
     if isinstance(level, str):
-        if sys.version_info >= (3, 11):
-            level = logging.getLevelNamesMapping().get(level.upper())
-        else:  # no public name-to-level mapping; getLevelName's str -> int case is deprecated
-            level = logging._nameToLevel.get(level.upper())  # pyright: ignore[reportPrivateUsage]
+        level = logging.getLevelNamesMapping().get(level.upper())
     if not isinstance(level, int):
         level = logging.INFO
     loggers: dict[str, dict[str, object]] = {
