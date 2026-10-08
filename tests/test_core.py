@@ -7,6 +7,7 @@ import logging
 import logging.config
 import os
 import runpy
+import signal
 import socket
 import sys
 import threading
@@ -1099,3 +1100,45 @@ def test_a_forked_handler_starts_its_own_writer_and_queue():
 def test_flush_never_raises():
     with patch.object(lcl, '_handlers', [object()]):
         assert lcl.flush(1) is False
+
+
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason='needs fork')
+def test_fork_while_another_thread_holds_the_handler_lock(collector):
+    holding, release = threading.Event(), threading.Event()
+
+    class Holding(MonologFormatter):
+        def format(self, record):
+            if record.msg == 'hold':  # handle() holds the handler lock while it formats
+                holding.set()
+                release.wait(10)
+            return super().format(record)
+
+    handler = CloudHandler(collector.address)
+    handler.setFormatter(Holding())
+    handler.handle(record('parent'))  # a running writer thread, whose queue lock the child must not use
+    assert lcl.flush(5)
+    thread = threading.Thread(target=handler.handle, args=(record('hold'),))
+    thread.start()
+    assert holding.wait(5)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', DeprecationWarning)  # 3.12+: fork with threads
+        pid = os.fork()
+    if pid == 0:  # logging reinitialises handler locks in the child, so handle() can't block forever
+        handler.handle(record('from child'))
+        os._exit(0 if lcl.flush(5) else 1)
+    try:
+        for _ in range(500):
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(0.01)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            pytest.fail('child blocked on the handler lock')
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert collector.find('from child')
+    finally:
+        release.set()
+        thread.join(5)
+        handler.close()
