@@ -4,14 +4,14 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-`laravel-cloud-logging`: a zero-runtime-dependency Python package that makes Python app logs render like Laravel (Monolog JSON) logs in the Laravel Cloud dashboard. Supports Python 3.10–3.15. README.md is the user-facing spec (per-framework/server setup, options, limits) — keep it in sync with behavior changes.
+`laravel-cloud-logging`: a zero-runtime-dependency Python package that makes Python app logs render like Laravel (Monolog JSON) logs in the Laravel Cloud dashboard. Supports Python 3.11–3.15. README.md is the user-facing spec (per-framework/server setup, options, limits) — keep it in sync with behavior changes.
 
 ## Commands
 
 All tooling runs through `uv`.
 
 ```sh
-uv run --locked scripts/check.py          # every CI gate locally, in parallel (lint, 3 type checkers, packaging, py3.10–3.15 tests, combined coverage)
+uv run --locked scripts/check.py          # every CI gate locally, in parallel (lint, 3 type checkers, packaging, py3.11–3.15 tests, combined coverage)
 uv run ruff check --fix . && uv run ruff format .   # autofix
 uv run pytest -q                          # tests on the current Python
 uv run pytest tests/test_core.py::test_name -q      # single test
@@ -63,7 +63,7 @@ Nearly everything lives in `src/laravel_cloud_logging/__init__.py`:
 
 - `MonologFormatter` turns a `LogRecord` into one JSON line with exactly seven top-level keys (`message, context, level, level_name, channel, datetime, extra`). Cloud classifies lines by their top-level keys, so never add new top-level keys — user `extra=` fields, `cloud_request_id`, `exception` and `stack` all go inside `context`. Python levels map to Monolog levels by rounding down via `_LEVELS`.
 - Size cap (`_LINE`, 256 KiB): `_encode` progressively degrades (cut strings, trim trace and drop `previous` chain, drop context, cut everything) so a record always stays valid structured JSON under Cloud's 1 MB plain-text cutoff. `_clean` normalizes arbitrary values with Monolog's depth/item/string limits.
-- `CloudHandler` writes to the Cloud log socket when `LARAVEL_CLOUD=1` (keeps lines from concurrent processes whole), reconnects per PID after fork, and falls back to `sys.__stdout__` with a `_RETRY` backoff. Invariant: logging never raises into the app — every failure path is suppressed or falls back.
+- `CloudHandler` writes to the Cloud log socket when `LARAVEL_CLOUD=1` (keeps lines from concurrent processes whole), reconnects per PID after fork, and falls back to `sys.__stdout__` with a `_RETRY` backoff. Invariant: logging never raises into the app — every failure path is suppressed or falls back. `emit()` formats on the caller's thread and queues bytes on a bounded `queue.Queue` (`LARAVEL_CLOUD_LOG_QUEUE`); a lazily started daemon writer thread owns the socket and the stdout fallback. Full queue: drop, count, then one JSON drop record. The pid check in `emit()` resets queue/writer/socket after fork. Module `flush(timeout)` is lock-free (signal-safe) for `os._exit` paths; `celery.setup` calls it on `worker_process_shutdown`. After `close()` or once finalizing, lines go to stdout synchronously. `LARAVEL_CLOUD_LOG_SYNC=1` keeps the synchronous path. Tests read stdout through `captured_stdout()`, which calls `flush()` first.
 - `LineFormatter` (readable lines via `_render`) is picked by `configure()` off Cloud when `sys.__stdout__` is a TTY, or with `LOG_FORMAT=line`; `LOG_FORMAT=json` forces JSON. On Cloud the format is always JSON, even for the stdout fallback. `_render` escapes control characters and must accept any parsed JSON object.
 - `pretty.py` (`python -m laravel_cloud_logging.pretty`): pail-like viewer that renders JSON lines from stdin or a wrapped command (`-- cmd`), with `--level`, `--request`, `--grep` filters; keeps the command's exit code and forwards SIGTERM. A full-screen TUI belongs in a separate package, not here.
 - `configure()` builds and applies a `dictConfig` (root + `_LOGGERS` framework loggers, silences `_ACCESS` loggers unless `access_logs=True`), registers NOTICE/ALERT/EMERGENCY level names, captures warnings, installs `sys`/`threading` excepthooks, and returns the dict (Gunicorn/Hypercorn take it as `logconfig_dict`). Must be idempotent. `_config()` builds the dict without applying it; keep it JSON-serializable (dotted-path strings for `'()'`), because `laravel-cloud-logging-config` (`python -m laravel_cloud_logging.config`) writes it as the `--log-config` file for Uvicorn and Granian.

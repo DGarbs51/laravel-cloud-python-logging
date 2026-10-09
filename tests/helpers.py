@@ -9,7 +9,7 @@ import threading
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from laravel_cloud_logging import MonologFormatter
+from laravel_cloud_logging import MonologFormatter, flush
 
 KEYS = ['message', 'context', 'level', 'level_name', 'channel', 'datetime', 'extra']
 
@@ -72,8 +72,16 @@ def captured_stdout():
     """Swap sys.__stdout__ (the handler's fallback) for a buffer; yields a function returning parsed lines."""
     raw = io.BytesIO()
     wrapper = io.TextIOWrapper(raw)
+
+    def lines():
+        flush(5)  # the handler's writer thread writes queued lines in the background
+        return [json.loads(line) for line in raw.getvalue().splitlines()]
+
     with patch.object(sys, '__stdout__', wrapper):
-        yield lambda: [json.loads(line) for line in raw.getvalue().splitlines()]
+        try:
+            yield lines
+        finally:
+            flush(5)
 
 
 class Broken(logging.LogRecord):

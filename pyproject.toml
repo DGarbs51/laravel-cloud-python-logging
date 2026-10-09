@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "laravel-cloud-logging"
-version = "0.3.1"
+version = "0.4.0"
 description = "Laravel-style (Monolog JSON) logging for Python apps on Laravel Cloud"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Devon Garbalosa" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = []
 keywords = ["laravel", "laravel-cloud", "logging", "monolog", "json", "django", "flask", "fastapi"]
 classifiers = [
@@ -25,7 +25,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -97,7 +96,7 @@ fail_under = 100
 show_missing = true
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 files = ["src/laravel_cloud_logging"]
 strict = true
 disallow_any_explicit = true
@@ -106,7 +105,7 @@ enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "po
 
 [tool.pyright]
 include = ["src/laravel_cloud_logging"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportUnnecessaryTypeIgnoreComment = "error"
 
@@ -114,7 +113,7 @@ reportUnnecessaryTypeIgnoreComment = "error"
 include = ["src/laravel_cloud_logging"]
 
 [tool.ty.environment]
-python-version = "3.10"
+python-version = "3.11"
 
 [tool.ty.terminal]
 error-on-warning = true
@@ -127,7 +126,7 @@ unused-ignore-comment = "error"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.format]
 quote-style = "single"

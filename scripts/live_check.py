@@ -21,7 +21,7 @@ import sys
 import threading
 import uuid
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -34,7 +34,7 @@ def emit(marker: str) -> None:
     lcl.configure('DEBUG')
     log = logging.getLogger('live_check')
     tag = f'live {marker}'
-    start = datetime.now(timezone.utc)
+    start = datetime.now(UTC)
     for name in LEVELS:
         log.log(logging.getLevelName(name), f'{tag} level {name}')
     log.info(
@@ -67,7 +67,7 @@ def emit(marker: str) -> None:
     for t in threads:
         t.join()
     logging.shutdown()
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     print(
         json.dumps(
             {

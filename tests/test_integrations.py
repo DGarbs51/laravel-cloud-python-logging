@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from helpers import lines_after
@@ -120,7 +121,7 @@ def test_gunicorn_logconfig_dict():
 
 def test_celery_setup():
     celery = pytest.importorskip('celery')
-    from celery.signals import setup_logging
+    from celery.signals import setup_logging, worker_process_shutdown
 
     from laravel_cloud_logging.celery import setup
 
@@ -131,6 +132,23 @@ def test_celery_setup():
     setup_logging.send(sender=None, loglevel='INFO', logfile=None, format='', colorize=False)
     assert only_cloud_handler()
     assert logging.getLogger().level == logging.DEBUG
+    with patch('laravel_cloud_logging.celery.flush') as flush:
+        worker_process_shutdown.send(sender=None, pid=1, exitcode=0)
+    flush.assert_called_once_with()
+
+
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason='prefork pool needs fork')
+def test_celery_prefork_child_lines_are_written_before_it_exits(tmp_path):
+    pytest.importorskip('celery')
+    (tmp_path / 'tasks.py').write_text(CELERY_APP)
+    # macOS pools spawn rather than fork; Celery only sets spawned children up with this flag.
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'PYTHONUNBUFFERED': '1', 'FORKED_BY_MULTIPROCESSING': '1'}
+    env.pop('LARAVEL_CLOUD', None)
+    # One task per child: the child logs, then billiard ends it with os._exit.
+    command = [sys.executable, '-m', 'celery', '-A', 'tasks', 'worker', '--pool=prefork', '--concurrency=1']
+    output = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60).stdout
+    messages = [json.loads(line)['message'] for line in output.splitlines() if line.startswith('{')]
+    assert messages.count('task ran') == 600, output
 
 
 def test_rq_either_order():
@@ -193,6 +211,45 @@ def test_waitress_serve_level():
     assert logging.getLogger('waitress').level == logging.WARNING
 
 
+CELERY_APP = """
+import logging
+import os
+import signal
+import threading
+import time
+
+from celery import Celery
+from celery.signals import worker_ready
+
+import laravel_cloud_logging
+from laravel_cloud_logging.celery import setup
+
+app = Celery('tasks', broker='memory://')
+app.conf.worker_max_tasks_per_child = 1
+setup(app)
+write = laravel_cloud_logging._stdout
+
+
+def slow(data):  # a slow log sink, so the writer thread is still behind when the child exits
+    time.sleep(0.002)
+    write(data)
+
+
+laravel_cloud_logging._stdout = slow
+
+
+@app.task
+def chatty():
+    for _ in range(200):
+        logging.getLogger('tasks').info('task ran')
+
+
+@worker_ready.connect
+def run(**_):
+    for _ in range(3):
+        chatty.delay()
+    threading.Timer(4, os.kill, (os.getpid(), signal.SIGTERM)).start()
+"""
 ASGI_APP = """
 from laravel_cloud_logging import asgi_middleware, configure
 
